@@ -1,0 +1,45 @@
+# /var/lib/pyca is bind-mounted (not a named volume) so the controller can
+# read recording sizes and the sqlite state file straight off the host at
+# ./data, without going through the Docker API.
+services:
+  pyca-schedule:
+    command: schedule
+    image: {{ pyca_image }}
+    restart: unless-stopped
+    volumes:
+      - ./pyca.conf:/etc/pyca/pyca.conf:ro
+      - ./data:/var/lib/pyca
+
+  pyca-ingest:
+    command: ingest
+    image: {{ pyca_image }}
+    restart: unless-stopped
+    volumes:
+      - ./pyca.conf:/etc/pyca/pyca.conf:ro
+      - ./data:/var/lib/pyca
+
+  pyca-capture:
+    command: capture
+    image: {{ pyca_image }}
+    restart: unless-stopped
+    volumes:
+      - ./pyca.conf:/etc/pyca/pyca.conf:ro
+      - ./data:/var/lib/pyca
+
+  pyca-agentstate:
+    command: agentstate
+    image: {{ pyca_image }}
+    restart: unless-stopped
+    volumes:
+      - ./pyca.conf:/etc/pyca/pyca.conf:ro
+      - ./data:/var/lib/pyca
+
+  pyca-ui:
+    entrypoint: ["gunicorn", "--config=/etc/pyca/gunicorn.conf.py", "pyca.ui:app"]
+    image: {{ pyca_image }}
+    restart: unless-stopped
+    volumes:
+      - ./pyca.conf:/etc/pyca/pyca.conf:ro
+      - ./data:/var/lib/pyca
+    ports:
+      - "{{ ui_port }}:8000"

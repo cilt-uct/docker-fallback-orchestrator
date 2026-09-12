@@ -1,0 +1,22 @@
+# Dev dependency stack. The controller itself is NOT containerized here:
+# it shells out to `docker compose` for each managed PyCA instance using
+# host-relative paths (./instances/<venue>/...), which breaks under
+# Docker-outside-of-Docker unless those paths are re-mapped to their real
+# host location. Run the controller directly on the host for now:
+#   uvicorn app.main:app --host 0.0.0.0 --port 8080
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: pyca_orchestrator
+      MYSQL_USER: pyca_orchestrator
+      MYSQL_PASSWORD: CHANGE_ME
+      MYSQL_ROOT_PASSWORD: CHANGE_ME
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+volumes:
+  mysql-data: {}
