@@ -6,11 +6,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Opencast
+    # Opencast, as reached by the controller process itself.
     opencast_host: str = "octestallinone.virtuos.uos.de"
     opencast_protocol: str = "https"
     opencast_username: str = "opencast_system_account"
     opencast_password: str = "CHANGE_ME"
+
+    # Opencast, as reached from inside a managed PyCA container.
+    opencast_container_host: str | None = None
+    opencast_container_protocol: str | None = None
 
     # MySQL
     mysql_host: str = "localhost"
@@ -34,6 +38,12 @@ class Settings(BaseSettings):
     @property
     def opencast_url(self) -> str:
         return f"{self.opencast_protocol}://{self.opencast_host}"
+
+    @property
+    def opencast_container_url(self) -> str:
+        host = self.opencast_container_host or self.opencast_host
+        protocol = self.opencast_container_protocol or self.opencast_protocol
+        return f"{protocol}://{host}"
 
     @property
     def sqlalchemy_database_uri(self) -> str:

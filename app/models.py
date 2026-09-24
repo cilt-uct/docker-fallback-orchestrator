@@ -37,6 +37,10 @@ class Instance(Base):
     mediapackage_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Not rotated on restart - see decision_engine.has_pending_ingest.
+    ui_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ui_password: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

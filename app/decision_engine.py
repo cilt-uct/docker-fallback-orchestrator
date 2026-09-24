@@ -14,6 +14,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app import compose_manager, pyca_config
@@ -54,11 +55,42 @@ def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source:
     return instance
 
 
-def _provision_and_start(instance: Instance) -> None:
-    ui_username, ui_password = pyca_config.generate_ui_credentials()
-    pyca_config.write_pyca_conf(instance, ui_username, ui_password)
+def provision_and_start(instance: Instance) -> None:
+    if not instance.rtsp_source:
+        raise ValueError(
+            f"No RTSP source known for agent '{instance.agent_id}' - refusing to start "
+            "a backup that could never capture anything"
+        )
+    # Reuse existing UI credentials instead of rotating them on each restart.
+    if not instance.ui_username or not instance.ui_password:
+        instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
+    pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
     compose_manager.render_compose_file(instance)
     compose_manager.up(instance)
+
+
+async def has_pending_ingest(instance: Instance) -> bool:
+    """True if the instance's PyCA UI has a recording paused after recording."""
+    if not instance.ui_username or not instance.ui_password:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"http://localhost:{instance.ui_port}/api/events",
+                auth=(instance.ui_username, instance.ui_password),
+            )
+            resp.raise_for_status()
+            events = resp.json().get("data", [])
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "Could not check pending ingest for %s, leaving it running to be safe: %s",
+            instance.venue,
+            exc,
+        )
+        return True
+    return any(
+        e.get("attributes", {}).get("status") == "paused after recording" for e in events
+    )
 
 
 async def run_once(oc: OpencastClient) -> None:
@@ -90,7 +122,7 @@ async def run_once(oc: OpencastClient) -> None:
                 try:
                     instance.status = InstanceStatus.starting
                     db.commit()
-                    _provision_and_start(instance)
+                    provision_and_start(instance)
                     instance.status = InstanceStatus.running
                     instance.last_error = None
                 except Exception as exc:  # noqa: BLE001 - surfaced via last_error
@@ -104,6 +136,13 @@ async def run_once(oc: OpencastClient) -> None:
         running_instances = db.query(Instance).filter_by(status=InstanceStatus.running).all()
         for instance in running_instances:
             if instance.agent_id in active_agent_ids:
+                continue
+            if await has_pending_ingest(instance):
+                logger.warning(
+                    "Not stopping backup instance for %s - it has a recording "
+                    "awaiting manual ingest",
+                    instance.agent_id,
+                )
                 continue
             logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
             try:

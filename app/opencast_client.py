@@ -57,8 +57,10 @@ class OpencastClient:
 
     async def get_scheduled_events(self) -> list[ScheduledEvent]:
         now = datetime.now(timezone.utc)
+        # startDate only bounds technical_start; drop finished events below instead.
+        earliest = now - timedelta(days=1)
         later = now + timedelta(days=settings.schedule_lookahead_days)
-        date_range = f"{_iso8601(now)}/{_iso8601(later)}"
+        date_range = f"{_iso8601(earliest)}/{_iso8601(later)}"
         filter_str = f"status:EVENTS.EVENTS.STATUS.SCHEDULED,startDate:{date_range}"
 
         resp = await self._client.get(
@@ -73,13 +75,16 @@ class OpencastClient:
             agent_id = event.get("agent_id")
             if not agent_id:
                 continue
+            end = datetime.fromisoformat(event["technical_end"])
+            if end < now:
+                continue
             events.append(
                 ScheduledEvent(
                     mediapackage_id=event["id"],
                     title=event.get("title", ""),
                     agent_id=agent_id,
                     start=datetime.fromisoformat(event["technical_start"]),
-                    end=datetime.fromisoformat(event["technical_end"]),
+                    end=end,
                 )
             )
         return events

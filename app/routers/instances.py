@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import compose_manager, pyca_config
+from app import compose_manager
 from app.database import get_db
+from app.decision_engine import provision_and_start
 from app.models import Instance, InstanceStatus
 from app.port_allocator import allocate_port
 from app.config import settings
@@ -56,10 +57,7 @@ def get_instance(instance_id: int, db: Session = Depends(get_db)):
 def start_instance(instance_id: int, db: Session = Depends(get_db)):
     instance = _get_instance_or_404(db, instance_id)
     try:
-        ui_username, ui_password = pyca_config.generate_ui_credentials()
-        pyca_config.write_pyca_conf(instance, ui_username, ui_password)
-        compose_manager.render_compose_file(instance)
-        compose_manager.up(instance)
+        provision_and_start(instance)
         instance.status = InstanceStatus.running
         instance.last_error = None
     except Exception as exc:  # noqa: BLE001

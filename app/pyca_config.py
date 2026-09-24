@@ -18,7 +18,7 @@ def render_pyca_conf(instance: Instance, ui_username: str, ui_password: str) -> 
         venue=instance.venue,
         agent_id=instance.agent_id,
         rtsp_source=instance.rtsp_source or "",
-        opencast_url=settings.opencast_url,
+        opencast_url=settings.opencast_container_url,
         opencast_username=settings.opencast_username,
         opencast_password=settings.opencast_password,
         ui_username=ui_username,
