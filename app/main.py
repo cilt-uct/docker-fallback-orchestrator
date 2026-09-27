@@ -1,12 +1,14 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.database import Base, engine
 from app.decision_engine import run_forever
-from app.routers import instances, monitoring
+from app.routers import instances, monitoring, web
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,5 +30,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="pyca-orchestrator", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent.parent / "static"), name="static")
 app.include_router(instances.router)
 app.include_router(monitoring.router)
+app.include_router(web.router)

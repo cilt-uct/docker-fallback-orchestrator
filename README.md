@@ -24,6 +24,19 @@ Core pieces exist and are wired together:
 - `app/models.py` - SQLAlchemy `Instance` model (MySQL)
 - `app/routers/instances.py` - CRUD + start/stop/restart API
 - `app/routers/monitoring.py` - status summary + recordings disk usage
+- `app/routers/web.py` + `templates/web/index.html` + `static/` - a Bootstrap
+  5 dashboard for monitoring and managing instances, served at `/`: stat
+  cards (instance counts, "needs attention", disk used), a
+  searchable/filterable/sortable instance table with a per-row "Actions"
+  dropdown, add/details/confirm modals, and toast/stale-data feedback on
+  poll failure. The 5s poll (`static/app.js`'s `refresh()`) does a keyed diff
+  against existing `<tr>` elements rather than replacing `tbody.innerHTML`,
+  so open dropdown/focus/scroll state survives a background refresh. Baseline
+  accessibility pass: skip link, landmarks, `aria-sort`, focus-visible
+  outlines, `prefers-reduced-motion` support, accessible form validation.
+  Verified against the running app (CRUD calls exercised, response shapes
+  confirmed) but not in an actual browser - visual rendering, focus-trap
+  behavior, phone-width layout, and contrast are unconfirmed.
 
 The full loop has been run end-to-end against a real Opencast + PyCA
 instance (see `dev/opencast-stack/`, a local test fixture), twice, with a
@@ -38,32 +51,27 @@ via the HTTP API too: `GET /instances`, `GET /instances/{id}` (live
 container status), start/stop, and `GET /monitoring/summary` (disk usage)
 all work as expected.
 
-That testing surfaced and fixed four real bugs (see git history):
+That testing surfaced and fixed four real bugs, each with more detail in its
+commit and in the relevant module:
 
-- `provision_and_start()` now refuses to start a backup when no RTSP source
-  was resolved for the agent, instead of silently generating a capture
-  command with a missing `-i` argument that could never record anything.
-- `pyca.conf`'s `[server] url` is now rendered from a separate
+- `provision_and_start()` now refuses to start a backup with no RTSP source
+  resolved for the agent, instead of silently generating a capture command
+  missing its `-i` argument.
+- `pyca.conf`'s `[server] url` now renders from a separate
   `OPENCAST_CONTAINER_HOST`/`OPENCAST_CONTAINER_PROTOCOL` setting (falling
-  back to `OPENCAST_HOST`/`OPENCAST_PROTOCOL`), since a PyCA container's
-  network namespace doesn't necessarily reach Opencast the same way the
-  controller process does (e.g. the controller on the host uses `localhost`,
-  a container needs `host.docker.internal` for the same connection).
-- `get_scheduled_events()` filtered on `startDate >= now`, so an event
-  dropped out of the "still needed" list the instant its start time passed -
-  tearing the backup down right as it was supposed to start recording. Now
-  looks back further and filters client-side on `technical_end >= now`
-  instead, so an in-progress recording stays counted as active through its
-  whole window.
-- The decision engine could tear an instance down while a completed
-  recording was still sitting in PyCA's own "paused after recording" state
-  waiting for manual ingest (backup-mode agents never auto-ingest - see
-  pyca's `utils.recording_state`), racing an operator who'd just started it
-  back up specifically to trigger that ingest. `decision_engine.has_pending_ingest()`
-  now checks the instance's own PyCA UI before tearing it down, and UI
-  credentials are persisted on the `Instance` row (not rotated per restart)
-  so that check - and an operator's own login - keep working across
-  restarts.
+  back to `OPENCAST_HOST`/`OPENCAST_PROTOCOL`), since a PyCA container often
+  can't reach Opencast the same way the controller process does (e.g.
+  `localhost` on the host vs. `host.docker.internal` in a container).
+- `get_scheduled_events()` now filters client-side on `technical_end >= now`
+  instead of the API's `startDate >= now`, so an in-progress recording stays
+  counted as "still needed" through its whole window instead of being torn
+  down the instant its start time passes.
+- `decision_engine.has_pending_ingest()` now checks the instance's own PyCA
+  UI before tearing it down, so a completed recording sitting in PyCA's
+  "paused after recording" state (awaiting manual ingest - backup-mode
+  agents never auto-ingest) doesn't get torn down out from under an operator.
+  UI credentials are persisted on the `Instance` row so this - and an
+  operator's own login - survive restarts.
 
 Two things hit during testing were confirmed to be artifacts of this local
 test rig, not app bugs - see "Testing against a real Opencast + PyCA" below.
@@ -86,39 +94,36 @@ docker compose -f dev/opencast-stack/compose.yaml up -d
 # takes a few minutes, longer under amd64 emulation on Apple Silicon.
 ```
 
-Notes from getting this running:
+Environment quirks hit while getting this running (all specific to this
+local rig, not app bugs):
 
-- Opencast's `opencast/allinone` and `pyca` images are amd64-only; on Apple
-  Silicon they run under Docker Desktop's emulation, which needs real memory
-  headroom - Opencast's JVM was OOM-killed (exit 137) at Docker Desktop's
-  default ~2GB VM limit. 6-8GB fixed it.
-- If `docker compose`/`docker build` fail with
-  `error getting credentials - err: exec: "docker-credential-desktop"...`,
-  that binary lives at `~/.docker/bin/docker-credential-desktop` but isn't
-  always on `PATH` in every shell - add it or invoke docker with an updated
-  `PATH` for that call.
+- Opencast's `opencast/allinone` and `pyca` images are amd64-only; under
+  Docker Desktop's Apple Silicon emulation, Opencast's JVM was OOM-killed
+  (exit 137) at the default ~2GB VM memory limit. 6-8GB fixed it.
+- `docker compose`/`docker build` failing with
+  `error getting credentials - err: exec: "docker-credential-desktop"...`
+  means that binary (`~/.docker/bin/docker-credential-desktop`) isn't on
+  `PATH` in that shell - add it or invoke docker with an updated `PATH`.
 - Point `pyca-orchestrator`'s own `.env` at this stack with
-  `OPENCAST_HOST=localhost:8080`, `OPENCAST_PROTOCOL=http`, and (since the
-  controller runs on the host but PyCA containers don't share its
-  `localhost`) `OPENCAST_CONTAINER_HOST=host.docker.internal:8080`,
+  `OPENCAST_HOST=localhost:8080`, `OPENCAST_PROTOCOL=http`, and (PyCA
+  containers don't share the controller's `localhost`)
+  `OPENCAST_CONTAINER_HOST=host.docker.internal:8080`,
   `OPENCAST_CONTAINER_PROTOCOL=http`.
-- Opencast's own `ORG_OPENCASTPROJECT_SERVER_URL` (`http://opencast:8080` in
-  this reference stack) is what it hands back for its *own* registered
-  service endpoints (scheduler, ingest, etc) - not just the URL used to
-  reach it initially. A backup PyCA stack is a separate `docker compose`
-  project, so it's on a different Docker network by default and can't
-  resolve that hostname. `docker network connect opencast-stack_default
-  <container>` for each `pyca-*` container works around it for local
-  testing; a real deployment wouldn't hit this since that setting would be
-  a real, publicly-resolvable hostname there.
-- The `quay.io/opencast/pyca` image's bundled `ffmpeg` is a
-  statically-linked glibc build, which is a known case where hostname
-  resolution skips `/etc/hosts` and does a raw DNS query only - so it can't
-  resolve `host.docker.internal` (a hosts-file-only entry on Docker
-  Desktop) even though the container's own shell (`getent hosts`) resolves
-  it fine. Use the actual gateway IP (from `docker exec <container> cat
-  /etc/hosts`) in a test RTSP source instead of the hostname. A real camera
-  with a routable IP wouldn't hit this.
+- Opencast's `ORG_OPENCASTPROJECT_SERVER_URL` (`http://opencast:8080` here)
+  is what it hands back for its own registered service endpoints (scheduler,
+  ingest, etc), not just the URL used to reach it initially - and a backup
+  PyCA stack, being a separate `docker compose` project, is on a different
+  Docker network by default and can't resolve that hostname. Workaround:
+  `docker network connect opencast-stack_default <container>` for each
+  `pyca-*` container. A real deployment wouldn't hit this, since that
+  setting would be a real, publicly-resolvable hostname there.
+- The `quay.io/opencast/pyca` image's bundled `ffmpeg` is a statically
+  linked glibc build, a known case where hostname resolution skips
+  `/etc/hosts` and does a raw DNS query only - so it can't resolve
+  `host.docker.internal` even though the container's own shell (`getent
+  hosts`) resolves it fine. Use the actual gateway IP (from `docker exec
+  <container> cat /etc/hosts`) in a test RTSP source instead of the
+  hostname. A real camera with a routable IP wouldn't hit this.
 
 ## Known gaps / next steps
 
@@ -151,6 +156,18 @@ Notes from getting this running:
   *started* ingest, not that Opencast's workflow actually succeeded - a
   recording could finish uploading and then fail Opencast-side processing
   with nothing here noticing.
+- **`GET /monitoring/summary`'s disk-usage walk doesn't scale.**
+  `_dir_size_bytes()` in `app/routers/monitoring.py` does a synchronous
+  `Path.rglob("*")` + `stat()` over every instance's `data/recordings`
+  directory, for every instance, on every call to `/monitoring/summary` - and
+  since the dashboard's `static/app.js` polls that endpoint every 5s
+  (`REFRESH_MS`), every open dashboard tab re-triggers the full walk on that
+  cadence. Fine at today's scale (1-2 test instances), but both instance
+  count and per-instance recording volume make this worse linearly, and
+  it's on the request path with no caching. Needs either a cached/debounced
+  size (e.g. refreshed on a slower background timer) or moving the
+  computation off the synchronous request path before instance count or
+  recording volume grows meaningfully.
 
 ## Running locally
 
@@ -162,8 +179,11 @@ cp .env.example .env   # fill in Opencast + MySQL credentials
 
 docker compose up -d mysql   # just the DB dependency
 
-uvicorn app.main:app --reload --port 8080
+uvicorn app.main:app --reload --port 8090
 ```
+
+Dashboard: http://localhost:8090/ (8080 is taken by Opencast itself if you're
+also running the local test stack below)
 
 ## Configuration
 

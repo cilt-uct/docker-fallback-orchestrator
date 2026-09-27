@@ -1,0 +1,284 @@
+/* UCT brand blue: decorative/UI-indicator use only. ~3.16:1 against white clears the 3:1 non-text bar (focus rings, borders) but fails 4.5:1 for text, so never used for text or button fills. */
+:root {
+  --uct-blue: #009ada;
+}
+
+body {
+  background-color: #f5f6f8;
+}
+
+.navbar-brand {
+  font-weight: 600;
+}
+
+.navbar.bg-dark {
+  border-bottom: 3px solid var(--uct-blue);
+}
+
+/* Placeholder mark (Wikipedia, not UCT's brand portal); height-only sizing makes swapping the asset later a one-line change. */
+.uct-logo {
+  height: 2rem;
+  width: auto;
+}
+
+/* ---- Accessibility helpers ---- */
+
+.skip-link {
+  position: absolute;
+  top: -3rem;
+  left: 0.5rem;
+  z-index: 1090;
+  background: #fff;
+  padding: 0.5rem 1rem;
+  border-radius: 0.25rem;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+/* Stronger, consistent focus ring everywhere, including custom controls */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.th-sort-btn:focus-visible {
+  outline: 2px solid var(--uct-blue);
+  outline-offset: 2px;
+}
+
+/* ---- Table toolbar (scoped to the instances card) ---- */
+/* Two rows: freshness (last updated / refresh) above narrowing (search / filter), the latter deliberately quieter as a secondary control set. */
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.toolbar-row-filters {
+  border-top: 1px solid var(--bs-border-color-translucent);
+  padding-top: 0.5rem;
+  font-size: 0.9em;
+}
+
+.toolbar-search {
+  flex: 1 1 12rem;
+  min-width: 9rem;
+  max-width: 18rem;
+}
+
+.toolbar-filter {
+  flex: 0 1 9rem;
+  min-width: 7.5rem;
+}
+
+#clear-filters-btn {
+  white-space: nowrap;
+}
+
+#instance-count-badge {
+  white-space: nowrap;
+}
+
+.refresh-icon {
+  display: inline-block;
+}
+
+#refresh-btn.is-refreshing .refresh-icon {
+  animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #refresh-btn.is-refreshing .refresh-icon {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * .table-responsive's `overflow-x: auto` also clips vertically per the CSS overflow spec (a non-visible
+ * value on one axis forces `auto` on the other), cutting off the Actions dropdown — not a z-index issue,
+ * since .dropdown-menu's z-index:1000 already beats the sticky thead's 1. app.js toggles this class on
+ * the dropdown's own show/hide events so horizontal scroll still works whenever no menu is open.
+ */
+.table-responsive.dropdown-open-in-table {
+  overflow: visible;
+}
+
+/* ---- Elevation ---- */
+/* Subtle shadow instead of Bootstrap's flat 1px-border card, applied consistently everywhere. */
+.card {
+  border: 0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 2px 8px rgba(15, 23, 42, 0.05);
+}
+
+/* ---- Stat cards ---- */
+
+.stat-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stat-card {
+    transition: none;
+  }
+
+  .stat-card:hover {
+    transform: none;
+  }
+}
+
+.stat-card .stat-value {
+  font-size: 1.75rem;
+  font-weight: 600;
+}
+
+.stat-card.attention .stat-value {
+  color: var(--bs-danger);
+}
+
+/* Mirrors .attention -> .stat-value: a permanently-red icon at zero errors would read as a false alarm. */
+.stat-card.attention .stat-icon {
+  background-color: var(--bs-danger-bg-subtle);
+  color: var(--bs-danger-text-emphasis);
+}
+
+.stat-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+  font-size: 1.25rem;
+}
+
+/* ---- Table ---- */
+
+#instances-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bs-card-bg, #fff);
+  z-index: 1;
+  white-space: nowrap;
+}
+
+th.sortable {
+  padding: 0;
+}
+
+/* Matches Bootstrap's default cell padding (.5rem .5rem) so sortable headers line up with the td content below — th.sortable zeroes its own padding and delegates it entirely to this button. */
+.th-sort-btn {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0.5rem;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+}
+
+.sort-indicator::after {
+  content: "";
+  display: inline-block;
+  width: 0.6em;
+}
+
+th[aria-sort="ascending"] .sort-indicator::after {
+  content: "\25B2";
+  font-size: 0.65em;
+}
+
+th[aria-sort="descending"] .sort-indicator::after {
+  content: "\25BC";
+  font-size: 0.65em;
+}
+
+/*
+ * Row height intentionally left at Bootstrap's default: the two-line Venue/Agent cell (name + agent_id),
+ * not single-line text, already sets each row's real height, so padding bumps just add uneven whitespace
+ * around shorter cells (badges, numeric values) instead of making rows taller in any useful way.
+ */
+
+/* Icon (set in app.js) conveys status by shape as well as color, which color alone can't for colorblind users. */
+.status-badge {
+  text-transform: capitalize;
+}
+
+.status-badge i {
+  vertical-align: -0.05em;
+}
+
+.last-error {
+  max-width: 22rem;
+}
+
+tr.row-new {
+  animation: fade-in-row 0.6s ease;
+}
+
+@keyframes fade-in-row {
+  from {
+    background-color: rgba(25, 135, 84, 0.15);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  tr.row-new {
+    animation: none;
+  }
+}
+
+/* ---- Toasts / banner ---- */
+
+#toast-container {
+  z-index: 1080;
+}
+
+/* Neutral chip instead of Bootstrap's default pink <code> — reads as a copyable ID, not inline prose. */
+#details-body code {
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg, #f1f3f5);
+  padding: 0.1em 0.4em;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+}
+
+#connection-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+/* ---- Small screens ---- */
+
+@media (max-width: 575.98px) {
+  .stat-value {
+    font-size: 1.4rem;
+  }
+
+  .toolbar-search,
+  .toolbar-filter {
+    max-width: none;
+    flex: 1 1 100%;
+  }
+}
