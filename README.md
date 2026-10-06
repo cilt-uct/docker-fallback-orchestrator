@@ -121,9 +121,153 @@ local rig, not app bugs):
   linked glibc build, a known case where hostname resolution skips
   `/etc/hosts` and does a raw DNS query only - so it can't resolve
   `host.docker.internal` even though the container's own shell (`getent
-  hosts`) resolves it fine. Use the actual gateway IP (from `docker exec
-  <container> cat /etc/hosts`) in a test RTSP source instead of the
-  hostname. A real camera with a routable IP wouldn't hit this.
+  hosts`) resolves it fine. Use a literal IP in the test RTSP source
+  instead of the hostname. A real camera with a routable IP wouldn't hit
+  this. Getting that IP needs some care: the Docker Desktop bridge
+  network's own gateway IP (e.g. `172.x.0.1`) looked like the obvious
+  candidate but actually got "connection refused" in testing - what
+  worked was `host.docker.internal`'s own IPv4 address, resolved from
+  *inside* a container of the same image (`getent ahosts
+  host.docker.internal`, not `getent hosts` - glibc's resolver prefers
+  the IPv6 record there, which these containers have no route to).
+
+### Automated end-to-end test script
+
+`dev/e2e_test.py` automates the manual loop above (agent offline ->
+backup provisioned -> real RTSP recording -> manual ingest -> Opencast
+processing) into a single repeatable run, including the `docker network
+connect` and literal-IP-for-ffmpeg workarounds. It assumes
+`dev/opencast-stack/` and this project's own MySQL (`docker compose up -d
+mysql`) are already up and the controller is running on `:8090` - it
+checks all three up front and fails fast with a clear message if they
+aren't, rather than failing confusingly partway through.
+
+```bash
+source .venv/bin/activate
+python dev/e2e_test.py
+```
+
+What it does, in order: starts a synthetic (non-testsrc, so a passing run
+actually proves the RTSP path rather than coincidentally matching PyCA's
+own default capture command) `mediamtx` + `ffmpeg` RTSP source if one
+isn't already running, points the `pyca-container` agent's capability at
+it, stops the stock PyCA services and forces the agent's capture-admin
+state to `offline`, schedules a real test event via the External API a
+short time out, polls `GET /instances` for the decision engine to
+provision a backup and runs `docker network connect` against its fresh
+containers, polls PyCA's own UI API for the recording to reach "paused
+after recording", PATCHes it to "finished recording" to trigger ingest,
+then polls Opencast until the workflow reaches a terminal state and
+reports `SUCCEEDED`/`FAILED`. On the way out it restores the stock PyCA
+services so the stack is back to a normal baseline for the next run.
+
+Useful flags (see `--help` for the full list):
+
+- `--lead-seconds` / `--duration-seconds` - how soon the test event starts
+  and how long it records (defaults: 90s / 60s).
+- `--skip-ingest` - stop after the recording finishes and print the exact
+  `curl` command for the manual ingest step instead of running it, for
+  when the point is demoing the PyCA UI to a person rather than checking
+  the pipe works.
+- `--skip-source` - skip the mediamtx/ffmpeg setup and capability
+  registration, if those are already in place from a previous run.
+- `--stop-source` - just stop the synthetic RTSP source and exit.
+- `--no-restore-agent` - leave the stock PyCA agent stopped afterwards,
+  to keep poking at the backup instance by hand.
+
+The script was run three times back-to-back against the live stack while
+writing it, each ending in `SUCCEEDED`, including the decision engine
+tearing the backup instance back down on its own afterwards once the
+stock agent was healthy again.
+
+### Scale test (`--count N`)
+
+`dev/e2e_test.py --count N` runs the same mechanism against N agents at
+once instead of just `pyca-container`, to check the decision engine
+actually provisions, runs, and tears down N independent backup stacks
+without cross-instance interference - not just the N=1 case above.
+
+```bash
+source .venv/bin/activate
+python dev/e2e_test.py --count 5
+```
+
+It doesn't need N real hardware capture agents: capture-admin tracks
+state for any `agent_id` it's told about, real device or not, which is
+also how the controller itself already treats agents - so agent #1 is
+the real `pyca-container` (stock PyCA services stopped, same as the
+single-agent script), and agents 2..N are purely synthetic
+`pyca-scale-2`, `pyca-scale-3`, etc, registered with capture-admin,
+forced offline, and scheduled a real overlapping event, with no backing
+container of their own. One `mediamtx` serves all N synthetic RTSP
+sources (it's path-agnostic); each gets its own `ffmpeg` publisher on
+its own path (`venue-cam`, `venue-cam-2`, `venue-cam-3`, ...) so a
+passing run proves N independently-sourced recordings, not one recording
+fanned out. Every wait step (provisioning, recording, ingest, workflow
+processing, teardown) polls all N agents in one shared loop rather than
+waiting on them one at a time, and one agent failing doesn't abort the
+others - the script always finishes with a per-agent `SUCCEEDED`/`FAILED`
+report rather than a single pass/fail for the whole run.
+
+Run against the live stack at N=5 (2026-10-05), all 5 agents reached
+`SUCCEEDED` - provisioned, recorded, ingested, Opencast processed, and
+torn back down on its own - in one pass, start to finish in ~4m12s
+wall-clock. What that run actually verified:
+
+- **Provisioning is correct but sequential, not parallel, at the Python
+  level - and the spread was small in practice, but that's not
+  guaranteed to hold.** `decision_engine.run_once()` loops over venues
+  one at a time per poll tick (see `app/decision_engine.py`), and each
+  `compose_manager.up()` is a blocking `subprocess.run(["docker",
+  "compose", "up", "-d"])` call awaited directly in that async loop - so
+  for however long `docker compose up -d` takes for one instance's 5
+  containers, the decision engine (and the FastAPI app, since they share
+  the same event loop) is blocked on exactly that one instance before
+  moving to the next. In this run, all 5 instances went from `stopped`
+  to `running` within a 5-second window (first at +32s, last at +37s
+  after the test started waiting - timestamps straight from
+  `GET /instances`), because each `docker compose up -d` only took
+  about a second with the `pyca` image already pulled and 5 lightweight
+  containers each. That window scales with N and with per-instance
+  startup cost (image pulls, slower disks, more services per instance),
+  and a slow or hung `docker compose up -d` for one venue would stall
+  starting - and stopping, and the HTTP API, since it's the same event
+  loop - every other venue behind it until it returns or times out.
+  There's no per-instance timeout or concurrency (e.g. a thread/process
+  pool) here yet.
+- **Port and compose-project isolation held.** All 5 instances got
+  distinct `ui_port`s (`9000`-`9004`, from `app/port_allocator.py`'s
+  lowest-free-port scan) and distinct `compose_project`s
+  (`pyca-pyca-container`, `pyca-pyca-scale-2`, ...), with no collisions -
+  checked by comparing the 5 `GET /instances` rows directly, not assumed.
+  Each instance's `./data/recordings` also stayed under its own
+  `instances/<venue>/` directory with its own recording files - no
+  cross-instance writes.
+- **Recording and ingest are genuinely concurrent.** All 5 PyCA UIs (on
+  their own ports) showed `recording` at the same poll, then all 5
+  showed `paused after recording` within one 5-second poll tick of each
+  other, and all 5 ingests were triggered and all 5 Opencast workflows
+  reached `PROCESSING`, then `PROCESSED`, together - these run as
+  independent containers on independent ports once provisioned, so
+  nothing here serializes them.
+- **Teardown was independent per instance and left a clean final
+  state.** After the events ended, the decision engine stopped all 5
+  backups on its own; a final `GET /instances` showed exactly 5 rows (one
+  per agent, no stray duplicates) all back to `stopped`, the 4 synthetic
+  agents left `offline` in capture-admin (harmless, as intended - there's
+  no de-registration API), and the real `pyca-container` agent back to
+  `idle` once its stock services were restored.
+- **`GET /monitoring/summary` handled 5 instances fine** (correct
+  `by_status` counts, 5 correctly-sized keys in
+  `recordings_bytes_by_instance`) - but see the Known gaps entry below on
+  why that endpoint's per-instance disk walk won't stay cheap as N or
+  recording volume grows further.
+- **Not exercised by this run**: what happens when one of N agents'
+  `docker compose up -d` actually fails or hangs (all 5 succeeded
+  cleanly here) - the script's per-agent error tracking (see
+  `wait_for_backup_instances()` et al in `dev/e2e_test.py`) is written to
+  handle that gracefully and keep going on the rest, but a real failure
+  injection wasn't tried.
 
 ## Known gaps / next steps
 
