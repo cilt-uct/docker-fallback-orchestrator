@@ -9,10 +9,10 @@ services:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: pyca_orchestrator
-      MYSQL_USER: pyca_orchestrator
-      MYSQL_PASSWORD: CHANGE_ME
-      MYSQL_ROOT_PASSWORD: CHANGE_ME
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-pyca_orchestrator}
+      MYSQL_USER: ${MYSQL_USER:-pyca_orchestrator}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
     ports:
       - "3306:3306"
     volumes:
