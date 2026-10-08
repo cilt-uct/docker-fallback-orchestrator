@@ -18,6 +18,18 @@ def _iso8601(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _extract_rtsp_source(capabilities: dict | None) -> str | None:
+    # Opencast serialises a single-item "item" as a bare object instead of a
+    # one-element list - only multi-capability agents get a real list.
+    items = (capabilities or {}).get("item") or []
+    if isinstance(items, dict):
+        items = [items]
+    return next(
+        (item["value"] for item in items if item.get("key") == "capture.device.presenter.src"),
+        None,
+    )
+
+
 @dataclass
 class ScheduledEvent:
     mediapackage_id: str
@@ -96,15 +108,7 @@ class OpencastClient:
         resp.raise_for_status()
 
         update = resp.json()["agent-state-update"]
-        capabilities = (update.get("capabilities") or {}).get("item") or []
-        rtsp_source = next(
-            (
-                item["value"]
-                for item in capabilities
-                if item.get("key") == "capture.device.presenter.src"
-            ),
-            None,
-        )
+        rtsp_source = _extract_rtsp_source(update.get("capabilities"))
 
         return AgentState(
             agent_id=agent_id,
