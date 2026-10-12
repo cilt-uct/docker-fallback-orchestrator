@@ -24,6 +24,9 @@ Core pieces exist and are wired together:
 - `app/models.py` - SQLAlchemy `Instance` model (MySQL)
 - `app/routers/instances.py` - CRUD + start/stop/restart API
 - `app/routers/monitoring.py` - status summary + recordings disk usage
+- `app/audit.py` + `app/routers/audit.py` - append-only audit trail of every
+  state-changing action (create/start/stop/restart/delete), whether an
+  operator made it through the API or the decision engine made it on its own
 - `app/routers/web.py` + `templates/web/index.html` + `static/` - a Bootstrap
   5 dashboard for monitoring and managing instances, served at `/`: stat
   cards (instance counts, "needs attention", disk used), a
@@ -344,3 +347,41 @@ agent-offline timeout).
 - `DELETE /instances/{id}` - remove a stopped instance
 - `GET /monitoring/summary` - counts by status + recordings disk usage per instance
 - `GET /monitoring/health` - liveness check
+- `GET /activity` - audit log page (linked from the dashboard navbar)
+- `GET /audit` - audit events, newest first. Filter with `instance_id`,
+  `venue`, `action`, `actor_type` (`operator`/`system`), `outcome`
+  (`success`/`failure`), `since`, `until`; page with `limit` + `before_id`
+
+## Audit log
+
+Every state-changing action writes a row to `audit_events` in the same
+transaction as the change itself, and emits the same event as a JSON line on
+the `audit` logger. Reads are not audited.
+
+Browse it from the dashboard: "Audit log" in the navbar opens `/activity`
+(`templates/web/audit.html` + `static/audit.js`; the navbar is the shared
+`templates/web/_navbar.html` partial), filterable by venue,
+action, actor and outcome. Times are shown in the browser's local timezone
+(stored and returned by the API as UTC), and new events appear on a 10s
+poll. Each instance row's Actions menu has a "View
+history" link to that page pre-filtered to its venue. Not yet checked in an
+actual browser.
+
+- **Actions**: `instance.create`, `instance.start`, `instance.stop`,
+  `instance.restart`, `instance.delete`, `instance.rtsp_source_changed`,
+  `instance.teardown_deferred`. Rejected and failed attempts are recorded
+  too, with `outcome: failure` and the error in `detail`.
+- **Actor**: decision-engine actions have `actor_type: system` and
+  `actor: "system"`, with the trigger in `detail.reason` (`agent_offline`,
+  `unhealthy_near_start`, `no_longer_needed`, `pending_ingest`). API actions
+  have `actor_type: operator`, the caller's `source_ip`, and `actor: null` -
+  there's no auth yet (see Known gaps), so there's no name to record.
+- **History outlives the instance**: `instance_id`/`venue`/`agent_id` are
+  snapshots, not foreign keys, so deleting an instance keeps its trail.
+- **Repeats are collapsed**: the engine retries a failed start and re-defers
+  a teardown on every poll; each is recorded once, and again only if the
+  error changes.
+- **No secrets**: credentials embedded in an RTSP URL are stripped before
+  it's written, and the PyCA UI password is never logged.
+- **Retention**: none - rows are kept forever. There is no API to edit or
+  delete them, but nothing stops a MySQL user with write access from doing so.

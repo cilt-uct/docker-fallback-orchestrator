@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -45,3 +45,37 @@ class Instance(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class AuditActorType(str, enum.Enum):
+    operator = "operator"
+    system = "system"
+
+
+class AuditOutcome(str, enum.Enum):
+    success = "success"
+    failure = "failure"
+
+
+class AuditEvent(Base):
+    """Append-only record of one state-changing action on an instance."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    actor_type: Mapped[AuditActorType] = mapped_column(Enum(AuditActorType), nullable=False)
+    # "system" for the decision engine; null for operators until the API has auth.
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    outcome: Mapped[AuditOutcome] = mapped_column(Enum(AuditOutcome), nullable=False)
+
+    # Snapshots, deliberately not foreign keys - history must outlive the instance row.
+    instance_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    venue: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)

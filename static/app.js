@@ -3,7 +3,9 @@
 /*
  * pyca-orchestrator dashboard
  *
- * Sections: config -> utilities -> API client -> state -> rendering
+ * Shared helpers (api, escapeHtml, formatRelativeTime) live in common.js.
+ *
+ * Sections: config -> utilities -> state -> rendering
  * (keyed diff against `rowElements`, so a 5s poll patches existing rows
  * instead of rebuilding the table and losing open dropdowns/focus/scroll)
  * -> event wiring (delegated) -> boot.
@@ -11,6 +13,8 @@
  * New instance field: add a data-field element to #row-template in
  * index.html, populate it in populateRow(). New row action: add a
  * data-action button to the dropdown menu plus a case in handleRowAction().
+ * (Plain links in the menu, like "View history", just get their href set in
+ * populateRow().)
  */
 
 // ---------------------------------------------------------------------
@@ -73,37 +77,6 @@ function formatBytes(bytes) {
   return `${value.toFixed(1)} ${units[i]}`;
 }
 
-function formatRelativeTime(isoString) {
-  if (!isoString) return "–";
-  const date = new Date(isoString.endsWith("Z") ? isoString : `${isoString}Z`);
-  if (Number.isNaN(date.getTime())) return "–";
-  const diffMs = Date.now() - date.getTime();
-  const diffSec = Math.round(diffMs / 1000);
-  const divisions = [
-    [60, "second"],
-    [60, "minute"],
-    [24, "hour"],
-    [30, "day"],
-    [12, "month"],
-    [Number.POSITIVE_INFINITY, "year"],
-  ];
-  let value = diffSec;
-  let unit = "second";
-  for (const [amount, nextUnit] of divisions) {
-    if (Math.abs(value) < amount) break;
-    value = Math.round(value / amount);
-    unit = nextUnit;
-  }
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  return rtf.format(-value, unit);
-}
-
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str ?? "";
-  return div.innerHTML;
-}
-
 function showToast(message, variant = "success") {
   const container = document.getElementById("toast-container");
   const toastEl = document.createElement("div");
@@ -159,30 +132,7 @@ function confirmAction({ title = "Confirm", body, confirmLabel = "Confirm", dang
 }
 
 // ---------------------------------------------------------------------
-// 3. API client
-// ---------------------------------------------------------------------
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      // ignore non-JSON error bodies
-    }
-    throw new Error(detail);
-  }
-  if (res.status === 204) return null;
-  return res.json();
-}
-
-// ---------------------------------------------------------------------
-// 4. State
+// 3. State
 // ---------------------------------------------------------------------
 
 const state = {
@@ -198,7 +148,7 @@ const state = {
 const rowElements = new Map();
 
 // ---------------------------------------------------------------------
-// 5. Rendering
+// 4. Rendering
 // ---------------------------------------------------------------------
 
 function renderSummary(summary) {
@@ -215,7 +165,8 @@ function renderSummary(summary) {
   const diskStat = document.getElementById("stat-disk");
   const diskBar = document.getElementById("disk-progress");
   if (disk) {
-    diskStat.textContent = `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`;
+    // Used is the headline; the total is context. One long "x / y" string wrapped onto three lines in a narrow card.
+    diskStat.innerHTML = `${escapeHtml(formatBytes(disk.used))} <span class="stat-sub">of ${escapeHtml(formatBytes(disk.total))}</span>`;
     const pct = disk.total ? Math.min(100, (disk.used / disk.total) * 100) : 0;
     diskBar.style.width = `${pct}%`;
     diskBar.className = `progress-bar ${pct > 90 ? "bg-danger" : pct > 75 ? "bg-warning" : "bg-success"}`;
@@ -323,6 +274,7 @@ function populateRow(tr, inst, bytes) {
   const canDelete = inst.status === "stopped" || inst.status === "error";
 
   const menu = tr.querySelector('[data-field="actions-menu"]');
+  menu.querySelector('[data-field="history-link"]').href = `/activity?venue=${encodeURIComponent(inst.venue)}`;
   menu.querySelector('[data-action="start"]').disabled = !canStart;
   menu.querySelector('[data-action="stop"]').disabled = !canStop;
   menu.querySelector('[data-action="restart"]').disabled = !canRestart;
@@ -516,7 +468,7 @@ function scheduleRefresh() {
 }
 
 // ---------------------------------------------------------------------
-// 6. Actions
+// 5. Actions
 // ---------------------------------------------------------------------
 
 async function doAction(id, action) {
@@ -641,7 +593,7 @@ async function createInstance(event) {
 }
 
 // ---------------------------------------------------------------------
-// 7. Boot / event wiring
+// 6. Boot / event wiring
 // ---------------------------------------------------------------------
 
 function initEvents() {

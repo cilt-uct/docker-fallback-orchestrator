@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models import InstanceStatus
+from app.models import AuditActorType, AuditOutcome, InstanceStatus
 
 
 class InstanceCreate(BaseModel):
@@ -33,3 +33,19 @@ class InstanceRuntimeStatus(BaseModel):
     instance: InstanceRead
     containers: list[dict]
     recordings_bytes: int | None = None
+
+
+class AuditEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    occurred_at: datetime
+    actor_type: AuditActorType
+    actor: str | None
+    source_ip: str | None
+    action: str
+    outcome: AuditOutcome
+    instance_id: int | None
+    venue: str | None
+    agent_id: str | None
+    detail: dict | None

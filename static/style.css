@@ -3,6 +3,11 @@
   --uct-blue: #009ada;
 }
 
+/* Reserve the scrollbar's width so the layout doesn't shift sideways between a short page and a long one. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   background-color: #f5f6f8;
 }
@@ -13,6 +18,60 @@ body {
 
 .navbar.bg-dark {
   border-bottom: 3px solid var(--uct-blue);
+}
+
+/* Primary navbar: on phones the page links drop to their own full-width row under the brand; from sm up everything sits on one line. */
+.app-navbar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0.5rem;
+}
+
+.app-navbar .navbar-brand {
+  margin-right: auto !important;
+}
+
+.app-nav-links {
+  order: 3;
+  width: 100%;
+  gap: 1rem;
+}
+
+/* 44px-tall targets. Inactive links are 0.55-alpha white (about 6:1 on #212529); the active one is full white and underlined in UCT blue, so it is not signalled by colour alone. No weight change: bold would alter the link's width and shift its neighbour between pages. */
+.app-navbar .nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 3px solid transparent;
+}
+
+.app-navbar .nav-link:hover {
+  color: #fff;
+}
+
+.app-navbar .nav-link.active {
+  color: #fff;
+  border-bottom-color: var(--uct-blue);
+}
+
+@media (min-width: 576px) {
+  .app-navbar-inner {
+    flex-wrap: nowrap;
+  }
+
+  .app-navbar .navbar-brand {
+    margin-right: 2rem !important;
+  }
+
+  .app-nav-links {
+    order: 0;
+    width: auto;
+    margin-right: auto;
+    gap: 1.5rem;
+  }
 }
 
 /* Placeholder mark (Wikipedia, not UCT's brand portal); height-only sizing makes swapping the asset later a one-line change. */
@@ -58,7 +117,8 @@ select:focus-visible,
 .toolbar-row-filters {
   border-top: 1px solid var(--bs-border-color-translucent);
   padding-top: 0.5rem;
-  font-size: 0.9em;
+  /* Same step as .small / .btn-sm / .form-select-sm, so the count sits on the type scale instead of at an odd 14.4px. */
+  font-size: 0.875rem;
 }
 
 .toolbar-search {
@@ -141,6 +201,14 @@ select:focus-visible,
 .stat-card .stat-value {
   font-size: 1.75rem;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.stat-card .stat-sub {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
 }
 
 .stat-card.attention .stat-value {
@@ -166,7 +234,13 @@ select:focus-visible,
 
 /* ---- Table ---- */
 
-#instances-table thead th {
+/* One header weight everywhere: sortable headers are buttons at 600, while plain <th> defaulted to the browser's 700, so the same row mixed two weights. */
+.table > thead th {
+  font-weight: 600;
+}
+
+#instances-table thead th,
+#audit-table thead th {
   position: sticky;
   top: 0;
   background: var(--bs-card-bg, #fff);
@@ -174,8 +248,35 @@ select:focus-visible,
   white-space: nowrap;
 }
 
+/* Inset the outer columns to line up with the card header's 1rem padding, instead of sitting 0.5rem from the card edge. */
+#instances-table tr > :first-child,
+#audit-table tr > :first-child {
+  padding-left: 1rem;
+}
+
+#instances-table tr > :last-child,
+#audit-table tr > :last-child {
+  padding-right: 1rem;
+}
+
+/* Bootstrap has no responsive nowrap utility. Keeping dates and venue names on one line is right on desktop, but on a phone it forces horizontal scrolling. */
+@media (min-width: 768px) {
+  .text-md-nowrap {
+    white-space: nowrap;
+  }
+}
+
 th.sortable {
   padding: 0;
+}
+
+/* Sortable headers delegate their padding to the button (see .th-sort-btn), so the inset goes there too. */
+#instances-table tr > th.sortable:first-child {
+  padding-left: 0;
+}
+
+#instances-table tr > th.sortable:first-child .th-sort-btn {
+  padding-left: 1rem;
 }
 
 /* Matches Bootstrap's default cell padding (.5rem .5rem) so sortable headers line up with the td content below — th.sortable zeroes its own padding and delegates it entirely to this button. */
@@ -255,12 +356,14 @@ tr.row-new {
 }
 
 /* Neutral chip instead of Bootstrap's default pink <code> — reads as a copyable ID, not inline prose. */
-#details-body code {
+#details-body code,
+.audit-detail code {
   color: var(--bs-body-color);
   background: var(--bs-tertiary-bg, #f1f3f5);
   padding: 0.1em 0.4em;
   border-radius: 0.25rem;
-  font-size: 0.85em;
+  /* rem, not em: these sit in both 16px and 14px text, and em made the audit page's IDs a hard-to-read 11.9px. */
+  font-size: 0.8125rem;
 }
 
 #connection-banner {
@@ -272,13 +375,39 @@ tr.row-new {
 /* ---- Small screens ---- */
 
 @media (max-width: 575.98px) {
-  .stat-value {
-    font-size: 1.4rem;
+  .stat-card .stat-value {
+    font-size: 1.25rem;
   }
 
-  .toolbar-search,
-  .toolbar-filter {
+  /* Two cards per row leaves ~100px for text; tighter icon and padding stop "180.2 GB" breaking across lines. */
+  .stat-card .card-body {
+    gap: 0.75rem !important;
+    padding: 0.75rem;
+  }
+
+  .stat-card .stat-sub {
+    display: block;
+    margin-top: -0.25rem;
+  }
+
+  .stat-icon {
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1rem;
+  }
+
+  .toolbar-search {
     max-width: none;
     flex: 1 1 100%;
+  }
+
+  /* Two selects per row instead of one each: four stacked full-width filters pushed the table off-screen. */
+  .toolbar-filter {
+    flex: 1 1 40%;
+  }
+
+  /* The lone funnel icon would otherwise take a row to itself once the search field goes full width. */
+  .toolbar-row-filters > .bi-funnel {
+    display: none;
   }
 }
