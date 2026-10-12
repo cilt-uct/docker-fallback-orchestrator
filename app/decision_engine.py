@@ -17,27 +17,44 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy.orm import Session
 
-from app import compose_manager, pyca_config
+from app import audit, compose_manager, pyca_config
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Instance, InstanceStatus
+from app.models import AuditOutcome, Instance, InstanceStatus
 from app.opencast_client import OpencastClient, ScheduledEvent
 from app.port_allocator import allocate_port
 
 logger = logging.getLogger("decision_engine")
 
+# Instances whose teardown was deferred on the previous poll, so a recording
+# left awaiting ingest is audited once rather than on every poll.
+_teardown_deferred_ids: set[int] = set()
 
-def _needs_backup(event: ScheduledEvent, agent_healthy: bool, agent_offline: bool) -> bool:
+
+def _backup_reason(event: ScheduledEvent, agent_healthy: bool, agent_offline: bool) -> str | None:
+    """Why this event needs a backup instance, or None if it doesn't."""
     if agent_offline:
-        return True
+        return "agent_offline"
     minutes_to_start = (event.start - datetime.now(timezone.utc)).total_seconds() / 60
-    return minutes_to_start <= settings.recording_lead_minutes and not agent_healthy
+    if minutes_to_start <= settings.recording_lead_minutes and not agent_healthy:
+        return "unhealthy_near_start"
+    return None
 
 
 def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | None) -> Instance:
     instance = db.query(Instance).filter_by(venue=venue).one_or_none()
     if instance:
         if rtsp_source and instance.rtsp_source != rtsp_source:
+            audit.record(
+                db,
+                actor=audit.SYSTEM,
+                action=audit.INSTANCE_RTSP_SOURCE_CHANGED,
+                instance=instance,
+                detail={
+                    "from": audit.redact_url(instance.rtsp_source),
+                    "to": audit.redact_url(rtsp_source),
+                },
+            )
             instance.rtsp_source = rtsp_source
         return instance
 
@@ -52,6 +69,13 @@ def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source:
     )
     db.add(instance)
     db.flush()
+    audit.record(
+        db,
+        actor=audit.SYSTEM,
+        action=audit.INSTANCE_CREATE,
+        instance=instance,
+        detail={"rtsp_source": audit.redact_url(rtsp_source), "ui_port": instance.ui_port},
+    )
     return instance
 
 
@@ -109,7 +133,8 @@ async def run_once(oc: OpencastClient) -> None:
                 logger.warning("No agent state for %s, skipping", event.agent_id)
                 continue
 
-            if not _needs_backup(event, agent_state.is_healthy, agent_state.is_offline):
+            reason = _backup_reason(event, agent_state.is_healthy, agent_state.is_offline)
+            if reason is None:
                 continue
 
             instance = _get_or_create_instance(
@@ -119,21 +144,37 @@ async def run_once(oc: OpencastClient) -> None:
 
             if instance.status != InstanceStatus.running:
                 logger.info("Starting backup instance for %s (event %s)", event.agent_id, event.mediapackage_id)
+                detail = {"reason": reason, "mediapackage_id": event.mediapackage_id}
+                # A failed start is retried every poll - only audit it when the error changes.
+                previous_error = instance.last_error if instance.status == InstanceStatus.error else None
                 try:
                     instance.status = InstanceStatus.starting
                     db.commit()
                     provision_and_start(instance)
                     instance.status = InstanceStatus.running
                     instance.last_error = None
+                    audit.record(
+                        db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance, detail=detail
+                    )
                 except Exception as exc:  # noqa: BLE001 - surfaced via last_error
                     logger.exception("Failed to start backup for %s", event.agent_id)
                     instance.status = InstanceStatus.error
                     instance.last_error = str(exc)
+                    if str(exc) != previous_error:
+                        audit.record(
+                            db,
+                            actor=audit.SYSTEM,
+                            action=audit.INSTANCE_START,
+                            outcome=AuditOutcome.failure,
+                            instance=instance,
+                            detail={**detail, "error": str(exc)},
+                        )
                 db.commit()
 
         # Tear down instances whose agent has recovered and has no near-term event.
         active_agent_ids = {e.agent_id for e in events}
         running_instances = db.query(Instance).filter_by(status=InstanceStatus.running).all()
+        deferred_ids: set[int] = set()
         for instance in running_instances:
             if instance.agent_id in active_agent_ids:
                 continue
@@ -143,19 +184,41 @@ async def run_once(oc: OpencastClient) -> None:
                     "awaiting manual ingest",
                     instance.agent_id,
                 )
+                deferred_ids.add(instance.id)
+                if instance.id not in _teardown_deferred_ids:
+                    audit.record(
+                        db,
+                        actor=audit.SYSTEM,
+                        action=audit.INSTANCE_TEARDOWN_DEFERRED,
+                        instance=instance,
+                        detail={"reason": "pending_ingest", "mediapackage_id": instance.mediapackage_id},
+                    )
+                    db.commit()
                 continue
             logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
+            detail = {"reason": "no_longer_needed", "mediapackage_id": instance.mediapackage_id}
             try:
                 instance.status = InstanceStatus.stopping
                 db.commit()
                 compose_manager.down(instance)
                 instance.status = InstanceStatus.stopped
                 instance.mediapackage_id = None
+                audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_STOP, instance=instance, detail=detail)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to stop backup for %s", instance.agent_id)
                 instance.status = InstanceStatus.error
                 instance.last_error = str(exc)
+                audit.record(
+                    db,
+                    actor=audit.SYSTEM,
+                    action=audit.INSTANCE_STOP,
+                    outcome=AuditOutcome.failure,
+                    instance=instance,
+                    detail={**detail, "error": str(exc)},
+                )
             db.commit()
+        _teardown_deferred_ids.clear()
+        _teardown_deferred_ids.update(deferred_ids)
     finally:
         db.close()
 
