@@ -1,0 +1,22 @@
+{#- Shared primary navigation. Include with `active` set to "instances" or "audit". Navigation only: page-specific actions (e.g. Add instance) live in the page, so the bar is identical everywhere. -#}
+<nav class="navbar navbar-dark bg-dark mb-4 app-navbar" aria-label="Primary">
+  <div class="container-fluid app-navbar-inner">
+    <a class="navbar-brand d-flex align-items-center gap-2 me-0" href="/">
+      <img src="{{ static_url('img/uct-logo.svg') }}" alt="University of Cape Town" class="uct-logo">
+      <span>pyca&#8209;orchestrator</span>
+    </a>
+
+    <ul class="navbar-nav flex-row app-nav-links">
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'instances' %} active{% endif %}" href="/"{% if active == 'instances' %} aria-current="page"{% endif %}>
+          <i class="bi bi-hdd-stack" aria-hidden="true"></i> Instances
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'audit' %} active{% endif %}" href="/activity"{% if active == 'audit' %} aria-current="page"{% endif %}>
+          <i class="bi bi-journal-text" aria-hidden="true"></i> Audit log
+        </a>
+      </li>
+    </ul>
+  </div>
+</nav>

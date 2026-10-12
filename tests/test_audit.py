@@ -11,6 +11,7 @@ from app.models import AuditActorType, AuditEvent, AuditOutcome, Instance, Insta
 from app.opencast_client import AgentState, ScheduledEvent
 from app.routers import audit as audit_router
 from app.routers import instances as instances_router
+from app.routers import web as web_router
 
 
 def _instance(db, venue="room-1", status=InstanceStatus.stopped, **kwargs):
@@ -37,6 +38,7 @@ def client(db):
     app = FastAPI()
     app.include_router(instances_router.router)
     app.include_router(audit_router.router)
+    app.include_router(web_router.router)
     app.dependency_overrides[get_db] = lambda: db
     return TestClient(app)
 
@@ -254,3 +256,13 @@ def test_engine_audits_deferred_teardown_once_then_the_stop(engine_db, monkeypat
     stop = _events(engine_db)[-1]
     assert (stop.action, stop.actor) == (audit.INSTANCE_STOP, "system")
     assert stop.detail == {"reason": "no_longer_needed", "mediapackage_id": "mp-1"}
+
+
+def test_dashboard_links_to_the_audit_log_page(client):
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert 'href="/activity"' in dashboard.text
+
+    page = client.get("/activity")
+    assert page.status_code == 200
+    assert "/static/audit.js" in page.text
