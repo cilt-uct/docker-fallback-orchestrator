@@ -346,11 +346,36 @@ agent-offline timeout).
 - `POST /instances/{id}/start` / `/stop` / `/restart`
 - `DELETE /instances/{id}` - remove a stopped instance
 - `GET /monitoring/summary` - counts by status + recordings disk usage per instance
-- `GET /monitoring/health` - liveness check
+- `GET /monitoring/health` - liveness check (always 200 while the process is up)
+- `GET /monitoring/ready` - readiness check: 503 unless MySQL answers and
+  the decision engine has polled Opencast successfully within the last 3
+  poll intervals; the body says which check failed
 - `GET /activity` - audit log page (linked from the dashboard navbar)
 - `GET /audit` - audit events, newest first. Filter with `instance_id`,
   `venue`, `action`, `actor_type` (`operator`/`system`), `outcome`
   (`success`/`failure`), `since`, `until`; page with `limit` + `before_id`
+
+## Error handling
+
+API errors are always JSON in the shape `{"detail": "..."}`.
+
+| Status | When |
+| --- | --- |
+| 409 | Duplicate venue, no free UI port, deleting a running instance, starting an instance with no RTSP source |
+| 422 | Invalid input - e.g. a venue that isn't lowercase letters/digits/`-`/`_`, which Docker would reject as a compose project name |
+| 502 | `docker compose` failed; `detail` carries its stderr |
+| 504 | `docker compose` exceeded `COMPOSE_TIMEOUT_SECONDS` |
+| 503 | MySQL or the Docker daemon is unreachable |
+| 500 | Anything unexpected. The cause is not echoed; `error_id` (or "ref ..." in `detail`) matches a logged traceback |
+
+The decision engine isolates failures per venue: an unreachable agent, a
+malformed scheduled event or a failed `docker compose` for one venue is
+logged and the rest of the poll continues. Only failing to fetch the
+schedule at all fails a poll, in which case nothing is started or torn down
+and `/monitoring/ready` goes to 503 after 3 missed polls. An instance left
+in `starting`/`stopping` by a crash mid-transition is picked up and finished
+on the next poll. The controller starts without the Docker daemon; Docker is
+only contacted when an instance is acted on or inspected.
 
 ## Audit log
 

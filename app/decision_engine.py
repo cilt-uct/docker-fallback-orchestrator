@@ -12,6 +12,7 @@ what "unhealthy" means.
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
@@ -21,7 +22,7 @@ from app import audit, compose_manager, pyca_config
 from app.config import settings
 from app.database import SessionLocal
 from app.models import AuditOutcome, Instance, InstanceStatus
-from app.opencast_client import OpencastClient, ScheduledEvent
+from app.opencast_client import AgentState, OpencastClient, OpencastError, ScheduledEvent
 from app.port_allocator import allocate_port
 
 logger = logging.getLogger("decision_engine")
@@ -79,9 +80,26 @@ def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source:
     return instance
 
 
+class InstanceNotStartableError(ValueError):
+    """The instance is missing something it needs before a start can even be attempted."""
+
+
+@dataclass
+class EngineStatus:
+    """Outcome of recent polls, for /monitoring/ready. Only a whole-pass failure counts as an error."""
+
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
+    consecutive_failures: int = 0
+
+
+status = EngineStatus()
+
+
 def provision_and_start(instance: Instance) -> None:
     if not instance.rtsp_source:
-        raise ValueError(
+        raise InstanceNotStartableError(
             f"No RTSP source known for agent '{instance.agent_id}' - refusing to start "
             "a backup that could never capture anything"
         )
@@ -105,118 +123,158 @@ async def has_pending_ingest(instance: Instance) -> bool:
             )
             resp.raise_for_status()
             events = resp.json().get("data", [])
-    except (httpx.HTTPError, ValueError) as exc:
+            return any(
+                e.get("attributes", {}).get("status") == "paused after recording" for e in events
+            )
+    except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         logger.warning(
             "Could not check pending ingest for %s, leaving it running to be safe: %s",
             instance.venue,
             exc,
         )
         return True
-    return any(
-        e.get("attributes", {}).get("status") == "paused after recording" for e in events
-    )
+
+
+async def _ensure_backup(
+    db: Session, oc: OpencastClient, event: ScheduledEvent, agent_cache: dict[str, AgentState | None]
+) -> None:
+    """Start a backup instance for one scheduled event if its agent needs one."""
+    if event.agent_id not in agent_cache:
+        agent_cache[event.agent_id] = await oc.get_agent_state(event.agent_id)
+    agent_state = agent_cache[event.agent_id]
+
+    if agent_state is None:
+        logger.warning("No agent state for %s, skipping", event.agent_id)
+        return
+
+    reason = _backup_reason(event, agent_state.is_healthy, agent_state.is_offline)
+    if reason is None:
+        return
+
+    instance = _get_or_create_instance(db, event.agent_id, event.agent_id, agent_state.rtsp_source)
+    instance.mediapackage_id = event.mediapackage_id
+
+    if instance.status == InstanceStatus.running:
+        return
+
+    logger.info("Starting backup instance for %s (event %s)", event.agent_id, event.mediapackage_id)
+    detail = {"reason": reason, "mediapackage_id": event.mediapackage_id}
+    # A failed start is retried every poll - only audit it when the error changes.
+    previous_error = instance.last_error if instance.status == InstanceStatus.error else None
+    instance.status = InstanceStatus.starting
+    db.commit()
+    try:
+        provision_and_start(instance)
+    except Exception as exc:  # noqa: BLE001 - surfaced via last_error
+        if isinstance(exc, (InstanceNotStartableError, compose_manager.ComposeError)):
+            logger.error("Failed to start backup for %s: %s", event.agent_id, exc)
+        else:
+            logger.exception("Failed to start backup for %s", event.agent_id)
+        instance.status = InstanceStatus.error
+        instance.last_error = str(exc)
+        if str(exc) != previous_error:
+            audit.record(
+                db,
+                actor=audit.SYSTEM,
+                action=audit.INSTANCE_START,
+                outcome=AuditOutcome.failure,
+                instance=instance,
+                detail={**detail, "error": str(exc)},
+            )
+    else:
+        instance.status = InstanceStatus.running
+        instance.last_error = None
+        audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance, detail=detail)
+    db.commit()
+
+
+async def _tear_down_if_idle(db: Session, instance: Instance, deferred_ids: set[int]) -> None:
+    """Stop one instance that no scheduled event needs any more, unless it still holds a recording."""
+    if await has_pending_ingest(instance):
+        logger.warning(
+            "Not stopping backup instance for %s - it has a recording awaiting manual ingest",
+            instance.agent_id,
+        )
+        deferred_ids.add(instance.id)
+        if instance.id not in _teardown_deferred_ids:
+            audit.record(
+                db,
+                actor=audit.SYSTEM,
+                action=audit.INSTANCE_TEARDOWN_DEFERRED,
+                instance=instance,
+                detail={"reason": "pending_ingest", "mediapackage_id": instance.mediapackage_id},
+            )
+            db.commit()
+        return
+
+    logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
+    detail = {"reason": "no_longer_needed", "mediapackage_id": instance.mediapackage_id}
+    instance.status = InstanceStatus.stopping
+    db.commit()
+    try:
+        compose_manager.down(instance)
+    except Exception as exc:  # noqa: BLE001 - surfaced via last_error
+        if isinstance(exc, compose_manager.ComposeError):
+            logger.error("Failed to stop backup for %s: %s", instance.agent_id, exc)
+        else:
+            logger.exception("Failed to stop backup for %s", instance.agent_id)
+        instance.status = InstanceStatus.error
+        instance.last_error = str(exc)
+        audit.record(
+            db,
+            actor=audit.SYSTEM,
+            action=audit.INSTANCE_STOP,
+            outcome=AuditOutcome.failure,
+            instance=instance,
+            detail={**detail, "error": str(exc)},
+        )
+    else:
+        instance.status = InstanceStatus.stopped
+        instance.mediapackage_id = None
+        audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_STOP, instance=instance, detail=detail)
+    db.commit()
 
 
 async def run_once(oc: OpencastClient) -> None:
+    """One poll. Failing to fetch the schedule fails the pass (and is raised);
+    a failure on one event or instance is logged and the rest still run."""
     db = SessionLocal()
     try:
         events = await oc.get_scheduled_events()
-        agent_cache: dict[str, object] = {}
+        agent_cache: dict[str, AgentState | None] = {}
 
         for event in events:
-            agent_state = agent_cache.get(event.agent_id)
-            if agent_state is None and event.agent_id not in agent_cache:
-                agent_state = await oc.get_agent_state(event.agent_id)
-                agent_cache[event.agent_id] = agent_state
-
-            if agent_state is None:
-                logger.warning("No agent state for %s, skipping", event.agent_id)
-                continue
-
-            reason = _backup_reason(event, agent_state.is_healthy, agent_state.is_offline)
-            if reason is None:
-                continue
-
-            instance = _get_or_create_instance(
-                db, event.agent_id, event.agent_id, agent_state.rtsp_source
-            )
-            instance.mediapackage_id = event.mediapackage_id
-
-            if instance.status != InstanceStatus.running:
-                logger.info("Starting backup instance for %s (event %s)", event.agent_id, event.mediapackage_id)
-                detail = {"reason": reason, "mediapackage_id": event.mediapackage_id}
-                # A failed start is retried every poll - only audit it when the error changes.
-                previous_error = instance.last_error if instance.status == InstanceStatus.error else None
-                try:
-                    instance.status = InstanceStatus.starting
-                    db.commit()
-                    provision_and_start(instance)
-                    instance.status = InstanceStatus.running
-                    instance.last_error = None
-                    audit.record(
-                        db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance, detail=detail
-                    )
-                except Exception as exc:  # noqa: BLE001 - surfaced via last_error
-                    logger.exception("Failed to start backup for %s", event.agent_id)
-                    instance.status = InstanceStatus.error
-                    instance.last_error = str(exc)
-                    if str(exc) != previous_error:
-                        audit.record(
-                            db,
-                            actor=audit.SYSTEM,
-                            action=audit.INSTANCE_START,
-                            outcome=AuditOutcome.failure,
-                            instance=instance,
-                            detail={**detail, "error": str(exc)},
-                        )
-                db.commit()
+            try:
+                await _ensure_backup(db, oc, event, agent_cache)
+            except OpencastError as exc:
+                db.rollback()
+                logger.warning("Skipping event %s for %s this poll: %s", event.mediapackage_id, event.agent_id, exc)
+            except Exception:  # noqa: BLE001 - one venue must not block the others
+                db.rollback()
+                logger.exception("Failed to handle event %s for %s", event.mediapackage_id, event.agent_id)
 
         # Tear down instances whose agent has recovered and has no near-term event.
+        # "starting"/"stopping" here are leftovers from a pass that died mid-transition
+        # (crash, lost DB connection); `compose down` is idempotent, so finish the job.
         active_agent_ids = {e.agent_id for e in events}
-        running_instances = db.query(Instance).filter_by(status=InstanceStatus.running).all()
+        candidate_ids = [
+            instance.id
+            for instance in db.query(Instance).filter(
+                Instance.status.in_(
+                    [InstanceStatus.running, InstanceStatus.starting, InstanceStatus.stopping]
+                )
+            )
+            if instance.agent_id not in active_agent_ids
+        ]
         deferred_ids: set[int] = set()
-        for instance in running_instances:
-            if instance.agent_id in active_agent_ids:
-                continue
-            if await has_pending_ingest(instance):
-                logger.warning(
-                    "Not stopping backup instance for %s - it has a recording "
-                    "awaiting manual ingest",
-                    instance.agent_id,
-                )
-                deferred_ids.add(instance.id)
-                if instance.id not in _teardown_deferred_ids:
-                    audit.record(
-                        db,
-                        actor=audit.SYSTEM,
-                        action=audit.INSTANCE_TEARDOWN_DEFERRED,
-                        instance=instance,
-                        detail={"reason": "pending_ingest", "mediapackage_id": instance.mediapackage_id},
-                    )
-                    db.commit()
-                continue
-            logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
-            detail = {"reason": "no_longer_needed", "mediapackage_id": instance.mediapackage_id}
+        for instance_id in candidate_ids:
             try:
-                instance.status = InstanceStatus.stopping
-                db.commit()
-                compose_manager.down(instance)
-                instance.status = InstanceStatus.stopped
-                instance.mediapackage_id = None
-                audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_STOP, instance=instance, detail=detail)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Failed to stop backup for %s", instance.agent_id)
-                instance.status = InstanceStatus.error
-                instance.last_error = str(exc)
-                audit.record(
-                    db,
-                    actor=audit.SYSTEM,
-                    action=audit.INSTANCE_STOP,
-                    outcome=AuditOutcome.failure,
-                    instance=instance,
-                    detail={**detail, "error": str(exc)},
-                )
-            db.commit()
+                instance = db.get(Instance, instance_id)
+                if instance is not None:
+                    await _tear_down_if_idle(db, instance, deferred_ids)
+            except Exception:  # noqa: BLE001 - one venue must not block the others
+                db.rollback()
+                logger.exception("Failed to tear down instance %s", instance_id)
         _teardown_deferred_ids.clear()
         _teardown_deferred_ids.update(deferred_ids)
     finally:
@@ -229,8 +287,17 @@ async def run_forever() -> None:
         while True:
             try:
                 await run_once(oc)
-            except Exception:  # noqa: BLE001 - keep the loop alive
-                logger.exception("Decision engine iteration failed")
+            except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                status.consecutive_failures += 1
+                status.last_error_at = datetime.now(timezone.utc)
+                status.last_error = str(exc) or repr(exc)
+                if isinstance(exc, OpencastError):
+                    logger.error("Decision engine poll failed: %s", exc)
+                else:
+                    logger.exception("Decision engine poll failed")
+            else:
+                status.consecutive_failures = 0
+                status.last_success_at = datetime.now(timezone.utc)
             await asyncio.sleep(settings.poll_interval_seconds)
     finally:
         await oc.aclose()

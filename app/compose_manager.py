@@ -9,9 +9,11 @@ the SDK by filtering on the `com.docker.compose.project` label.
 """
 
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 import docker
+from docker.errors import DockerException
 from jinja2 import Environment, FileSystemLoader
 
 from app.config import settings
@@ -20,11 +22,24 @@ from app.models import Instance
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 _jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
 
-_docker_client = docker.from_env()
-
-
 class ComposeError(RuntimeError):
+    """A `docker compose` command failed, timed out, or couldn't be run."""
+
+
+class ComposeTimeoutError(ComposeError):
     pass
+
+
+class DockerUnavailableError(RuntimeError):
+    """The Docker daemon couldn't be reached for a status query."""
+
+
+@lru_cache(maxsize=1)
+def _docker_client() -> docker.DockerClient:
+    # Created on first use, not at import, so the controller can start (and
+    # serve the dashboard) while the Docker daemon is down. A failed attempt
+    # isn't cached, so it recovers once Docker is back.
+    return docker.from_env()
 
 
 def render_compose_file(instance: Instance) -> Path:
@@ -40,11 +55,21 @@ def render_compose_file(instance: Instance) -> Path:
 
 def _run_compose(instance: Instance, *args: str) -> None:
     compose_path = Path(instance.config_dir) / "docker-compose.yaml"
-    result = subprocess.run(
-        ["docker", "compose", "-p", instance.compose_project, "-f", str(compose_path), *args],
-        capture_output=True,
-        text=True,
-    )
+    command = " ".join(args)
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-p", instance.compose_project, "-f", str(compose_path), *args],
+            capture_output=True,
+            text=True,
+            timeout=settings.compose_timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ComposeTimeoutError(
+            f"docker compose {command} timed out after {settings.compose_timeout_seconds}s "
+            f"for {instance.venue}"
+        ) from exc
+    except OSError as exc:  # docker binary missing or not executable
+        raise ComposeError(f"Could not run docker compose {command} for {instance.venue}: {exc}") from exc
     if result.returncode != 0:
         raise ComposeError(
             f"docker compose {' '.join(args)} failed for {instance.venue}: {result.stderr.strip()}"
@@ -64,10 +89,13 @@ def restart(instance: Instance) -> None:
 
 
 def container_statuses(instance: Instance) -> list[dict]:
-    containers = _docker_client.containers.list(
-        all=True,
-        filters={"label": f"com.docker.compose.project={instance.compose_project}"},
-    )
+    try:
+        containers = _docker_client().containers.list(
+            all=True,
+            filters={"label": f"com.docker.compose.project={instance.compose_project}"},
+        )
+    except DockerException as exc:
+        raise DockerUnavailableError(f"Could not query Docker for {instance.venue}: {exc}") from exc
     return [
         {
             "name": c.name,

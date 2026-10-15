@@ -93,7 +93,7 @@ def test_duplicate_create_is_audited_as_failure(client, db):
 def test_start_failure_is_audited_with_error(client, db):
     instance = _instance(db)  # no rtsp_source, so provision_and_start refuses
     resp = client.post(f"/instances/{instance.id}/start")
-    assert resp.status_code == 500
+    assert resp.status_code == 409
 
     (event,) = _events(db)
     assert event.action == audit.INSTANCE_START

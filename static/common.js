@@ -49,7 +49,19 @@ async function api(path, options = {}) {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail || detail;
+      if (Array.isArray(body.detail)) {
+        // FastAPI validation errors: a list of {loc, msg}, not a string.
+        detail = body.detail
+          .map((item) => {
+            const field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : null;
+            return field && field !== "body" ? `${field}: ${item.msg}` : item.msg;
+          })
+          .join("; ");
+      } else {
+        detail = body.detail || detail;
+      }
+      // Reference for an unexpected server error, to match against the server log.
+      if (body.error_id) detail += ` (ref ${body.error_id})`;
     } catch {
       // ignore non-JSON error bodies
     }

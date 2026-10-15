@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     recording_lead_minutes: int = 15
     agent_offline_seconds: int = 300
 
+    # Upper bound on one `docker compose` call (up can include an image pull).
+    compose_timeout_seconds: int = 300
+
     @property
     def opencast_url(self) -> str:
         return f"{self.opencast_protocol}://{self.opencast_host}"

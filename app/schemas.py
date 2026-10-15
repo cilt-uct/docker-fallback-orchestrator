@@ -1,14 +1,16 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import AuditActorType, AuditOutcome, InstanceStatus
 
 
 class InstanceCreate(BaseModel):
-    venue: str
-    agent_id: str
-    rtsp_source: str | None = None
+    # The venue names the compose project and the config directory, so it has to be
+    # valid for both - Docker rejects anything else only later, at start time.
+    venue: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    agent_id: str = Field(min_length=1, max_length=128)
+    rtsp_source: str | None = Field(default=None, max_length=512)
 
 
 class InstanceRead(BaseModel):
