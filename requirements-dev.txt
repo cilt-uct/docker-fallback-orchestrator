@@ -1,0 +1,4 @@
+# Test and lint tooling, on top of the app's own requirements.
+-r requirements.txt
+pytest==9.1.1
+ruff==0.17.1

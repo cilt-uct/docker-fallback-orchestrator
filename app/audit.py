@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AuditActorType, AuditEvent, AuditOutcome, Instance
 
-logger = logging.getLogger("audit")
+logger = logging.getLogger(__name__)
 
 INSTANCE_CREATE = "instance.create"
 INSTANCE_START = "instance.start"

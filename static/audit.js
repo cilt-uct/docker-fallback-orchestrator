@@ -24,6 +24,7 @@ const ACTION_LABEL = {
   "instance.teardown_deferred": "Teardown deferred",
 };
 
+// One entry per BackupReason in app/decision_engine.py.
 const REASON_LABEL = {
   agent_offline: "Agent offline",
   unhealthy_near_start: "Agent unhealthy close to recording start",

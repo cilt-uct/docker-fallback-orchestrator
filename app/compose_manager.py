@@ -22,6 +22,7 @@ from app.models import Instance
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 _jinja_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
 
+
 class ComposeError(RuntimeError):
     """A `docker compose` command failed, timed out, or couldn't be run."""
 
@@ -104,8 +105,3 @@ def container_statuses(instance: Instance) -> list[dict]:
         }
         for c in containers
     ]
-
-
-def is_running(instance: Instance) -> bool:
-    statuses = container_statuses(instance)
-    return bool(statuses) and all(s["status"] == "running" for s in statuses)

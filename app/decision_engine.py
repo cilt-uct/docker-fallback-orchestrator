@@ -11,34 +11,46 @@ what "unhealthy" means.
 """
 
 import asyncio
+import enum
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy.orm import Session
 
-from app import audit, compose_manager, pyca_config
+from app import audit, compose_manager
 from app.config import settings
 from app.database import SessionLocal
+from app.instance_lifecycle import InstanceNotStartableError, build_instance, provision_and_start
 from app.models import AuditOutcome, Instance, InstanceStatus
 from app.opencast_client import AgentState, OpencastClient, OpencastError, ScheduledEvent
-from app.port_allocator import allocate_port
 
-logger = logging.getLogger("decision_engine")
+logger = logging.getLogger(__name__)
+
+
+class BackupReason(str, enum.Enum):
+    """Why the engine started, stopped or kept an instance. Stored in audit event details;
+    static/audit.js has a human-readable label for each value."""
+
+    agent_offline = "agent_offline"
+    unhealthy_near_start = "unhealthy_near_start"
+    no_longer_needed = "no_longer_needed"
+    pending_ingest = "pending_ingest"
+
 
 # Instances whose teardown was deferred on the previous poll, so a recording
 # left awaiting ingest is audited once rather than on every poll.
 _teardown_deferred_ids: set[int] = set()
 
 
-def _backup_reason(event: ScheduledEvent, agent_healthy: bool, agent_offline: bool) -> str | None:
+def _backup_reason(event: ScheduledEvent, agent_healthy: bool, agent_offline: bool) -> BackupReason | None:
     """Why this event needs a backup instance, or None if it doesn't."""
     if agent_offline:
-        return "agent_offline"
-    minutes_to_start = (event.start - datetime.now(timezone.utc)).total_seconds() / 60
+        return BackupReason.agent_offline
+    minutes_to_start = (event.start - datetime.now(UTC)).total_seconds() / 60
     if minutes_to_start <= settings.recording_lead_minutes and not agent_healthy:
-        return "unhealthy_near_start"
+        return BackupReason.unhealthy_near_start
     return None
 
 
@@ -59,15 +71,7 @@ def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source:
             instance.rtsp_source = rtsp_source
         return instance
 
-    instance = Instance(
-        venue=venue,
-        agent_id=agent_id,
-        ui_port=allocate_port(db),
-        compose_project=f"pyca-{venue}",
-        config_dir=str(settings.instances_dir / venue),
-        rtsp_source=rtsp_source,
-        status=InstanceStatus.stopped,
-    )
+    instance = build_instance(db, venue, agent_id, rtsp_source)
     db.add(instance)
     db.flush()
     audit.record(
@@ -78,10 +82,6 @@ def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source:
         detail={"rtsp_source": audit.redact_url(rtsp_source), "ui_port": instance.ui_port},
     )
     return instance
-
-
-class InstanceNotStartableError(ValueError):
-    """The instance is missing something it needs before a start can even be attempted."""
 
 
 @dataclass
@@ -97,20 +97,6 @@ class EngineStatus:
 status = EngineStatus()
 
 
-def provision_and_start(instance: Instance) -> None:
-    if not instance.rtsp_source:
-        raise InstanceNotStartableError(
-            f"No RTSP source known for agent '{instance.agent_id}' - refusing to start "
-            "a backup that could never capture anything"
-        )
-    # Reuse existing UI credentials instead of rotating them on each restart.
-    if not instance.ui_username or not instance.ui_password:
-        instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
-    pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
-    compose_manager.render_compose_file(instance)
-    compose_manager.up(instance)
-
-
 async def has_pending_ingest(instance: Instance) -> bool:
     """True if the instance's PyCA UI has a recording paused after recording."""
     if not instance.ui_username or not instance.ui_password:
@@ -123,9 +109,7 @@ async def has_pending_ingest(instance: Instance) -> bool:
             )
             resp.raise_for_status()
             events = resp.json().get("data", [])
-            return any(
-                e.get("attributes", {}).get("status") == "paused after recording" for e in events
-            )
+            return any(e.get("attributes", {}).get("status") == "paused after recording" for e in events)
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         logger.warning(
             "Could not check pending ingest for %s, leaving it running to be safe: %s",
@@ -158,7 +142,7 @@ async def _ensure_backup(
         return
 
     logger.info("Starting backup instance for %s (event %s)", event.agent_id, event.mediapackage_id)
-    detail = {"reason": reason, "mediapackage_id": event.mediapackage_id}
+    detail = {"reason": reason.value, "mediapackage_id": event.mediapackage_id}
     # A failed start is retried every poll - only audit it when the error changes.
     previous_error = instance.last_error if instance.status == InstanceStatus.error else None
     instance.status = InstanceStatus.starting
@@ -202,13 +186,16 @@ async def _tear_down_if_idle(db: Session, instance: Instance, deferred_ids: set[
                 actor=audit.SYSTEM,
                 action=audit.INSTANCE_TEARDOWN_DEFERRED,
                 instance=instance,
-                detail={"reason": "pending_ingest", "mediapackage_id": instance.mediapackage_id},
+                detail={
+                    "reason": BackupReason.pending_ingest.value,
+                    "mediapackage_id": instance.mediapackage_id,
+                },
             )
             db.commit()
         return
 
     logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
-    detail = {"reason": "no_longer_needed", "mediapackage_id": instance.mediapackage_id}
+    detail = {"reason": BackupReason.no_longer_needed.value, "mediapackage_id": instance.mediapackage_id}
     instance.status = InstanceStatus.stopping
     db.commit()
     try:
@@ -248,7 +235,9 @@ async def run_once(oc: OpencastClient) -> None:
                 await _ensure_backup(db, oc, event, agent_cache)
             except OpencastError as exc:
                 db.rollback()
-                logger.warning("Skipping event %s for %s this poll: %s", event.mediapackage_id, event.agent_id, exc)
+                logger.warning(
+                    "Skipping event %s for %s this poll: %s", event.mediapackage_id, event.agent_id, exc
+                )
             except Exception:  # noqa: BLE001 - one venue must not block the others
                 db.rollback()
                 logger.exception("Failed to handle event %s for %s", event.mediapackage_id, event.agent_id)
@@ -289,7 +278,7 @@ async def run_forever() -> None:
                 await run_once(oc)
             except Exception as exc:  # noqa: BLE001 - keep the loop alive
                 status.consecutive_failures += 1
-                status.last_error_at = datetime.now(timezone.utc)
+                status.last_error_at = datetime.now(UTC)
                 status.last_error = str(exc) or repr(exc)
                 if isinstance(exc, OpencastError):
                     logger.error("Decision engine poll failed: %s", exc)
@@ -297,7 +286,7 @@ async def run_forever() -> None:
                     logger.exception("Decision engine poll failed")
             else:
                 status.consecutive_failures = 0
-                status.last_success_at = datetime.now(timezone.utc)
+                status.last_success_at = datetime.now(UTC)
             await asyncio.sleep(settings.poll_interval_seconds)
     finally:
         await oc.aclose()

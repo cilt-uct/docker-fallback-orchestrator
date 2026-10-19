@@ -14,7 +14,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-logger = logging.getLogger("api")
+from app.constants import HTTP_500_INTERNAL_SERVER_ERROR, HTTP_503_SERVICE_UNAVAILABLE
+
+logger = logging.getLogger(__name__)
 
 
 def new_error_id() -> str:
@@ -26,24 +28,26 @@ async def _database_error(request: Request, exc: SQLAlchemyError) -> JSONRespons
     error_id = new_error_id()
     # Connection-level failures (MySQL down, connection dropped) are worth retrying; the rest are bugs.
     unavailable = isinstance(exc, (OperationalError, InterfaceError, PoolTimeoutError))
-    logger.error(
-        "Database error [%s] on %s %s", error_id, request.method, request.url.path, exc_info=exc
-    )
+    logger.error("Database error [%s] on %s %s", error_id, request.method, request.url.path, exc_info=exc)
     if unavailable:
         return JSONResponse(
-            status_code=503,
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Database unavailable - try again shortly", "error_id": error_id},
             headers={"Retry-After": "5"},
         )
-    return JSONResponse(status_code=500, content={"detail": "Internal server error", "error_id": error_id})
+    return JSONResponse(
+        status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error", "error_id": error_id},
+    )
 
 
 async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
     error_id = new_error_id()
-    logger.error(
-        "Unhandled error [%s] on %s %s", error_id, request.method, request.url.path, exc_info=exc
+    logger.error("Unhandled error [%s] on %s %s", error_id, request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error", "error_id": error_id},
     )
-    return JSONResponse(status_code=500, content={"detail": "Internal server error", "error_id": error_id})
 
 
 def register_exception_handlers(app: FastAPI) -> None:

@@ -6,15 +6,30 @@ from sqlalchemy.orm import Session
 
 from app import audit, compose_manager
 from app.audit import Actor, operator_actor
+from app.constants import (
+    HTTP_201_CREATED,
+    HTTP_204_NO_CONTENT,
+    HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+    HTTP_502_BAD_GATEWAY,
+    HTTP_503_SERVICE_UNAVAILABLE,
+    HTTP_504_GATEWAY_TIMEOUT,
+)
 from app.database import get_db
-from app.decision_engine import InstanceNotStartableError, provision_and_start
 from app.errors import new_error_id
+from app.instance_lifecycle import (
+    InstanceNotStartableError,
+    build_instance,
+    dir_size_bytes,
+    provision_and_start,
+    recordings_dir,
+)
 from app.models import AuditOutcome, Instance, InstanceStatus
-from app.port_allocator import NoPortsAvailableError, allocate_port
-from app.config import settings
+from app.port_allocator import NoPortsAvailableError
 from app.schemas import InstanceCreate, InstanceRead, InstanceRuntimeStatus
 
-logger = logging.getLogger("api.instances")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/instances", tags=["instances"])
 
@@ -28,16 +43,19 @@ def _action_failed(
     (e.g. docker compose's stderr). Anything else is logged with a reference and not echoed.
     """
     if isinstance(exc, InstanceNotStartableError):
-        status_code, detail = 409, str(exc)
+        status_code, detail = HTTP_409_CONFLICT, str(exc)
     elif isinstance(exc, compose_manager.ComposeTimeoutError):
-        status_code, detail = 504, str(exc)
+        status_code, detail = HTTP_504_GATEWAY_TIMEOUT, str(exc)
     elif isinstance(exc, compose_manager.ComposeError):
-        status_code, detail = 502, str(exc)
+        status_code, detail = HTTP_502_BAD_GATEWAY, str(exc)
     else:
         error_id = new_error_id()
         logger.error("Unexpected error [%s] trying to %s %s", error_id, verb, instance.venue, exc_info=exc)
-        status_code, detail = 500, f"Failed to {verb} instance: internal error (ref {error_id})"
-    if status_code != 500:
+        status_code, detail = (
+            HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Failed to {verb} instance: internal error (ref {error_id})",
+        )
+    if status_code != HTTP_500_INTERNAL_SERVER_ERROR:
         logger.warning("Failed to %s %s: %s", verb, instance.venue, exc)
 
     instance.status = InstanceStatus.error
@@ -59,57 +77,53 @@ def list_instances(db: Session = Depends(get_db)):
     return db.query(Instance).all()
 
 
-@router.post("", response_model=InstanceRead, status_code=201)
+def _create_rejected(
+    db: Session, actor: Actor, payload: InstanceCreate, error: str, detail: str
+) -> HTTPException:
+    """Audit a create that didn't happen, and build its 409 response."""
+    audit.record(
+        db,
+        actor=actor,
+        action=audit.INSTANCE_CREATE,
+        outcome=AuditOutcome.failure,
+        venue=payload.venue,
+        agent_id=payload.agent_id,
+        detail={"error": error},
+    )
+    db.commit()
+    return HTTPException(HTTP_409_CONFLICT, detail)
+
+
+@router.post("", response_model=InstanceRead, status_code=HTTP_201_CREATED)
 def create_instance(
     payload: InstanceCreate,
     db: Session = Depends(get_db),
     actor: Actor = Depends(operator_actor),
 ):
     if db.query(Instance).filter_by(venue=payload.venue).first():
-        audit.record(
-            db,
-            actor=actor,
-            action=audit.INSTANCE_CREATE,
-            outcome=AuditOutcome.failure,
-            venue=payload.venue,
-            agent_id=payload.agent_id,
-            detail={"error": "venue already exists"},
+        raise _create_rejected(
+            db, actor, payload, "venue already exists", f"Instance for venue '{payload.venue}' already exists"
         )
-        db.commit()
-        raise HTTPException(409, f"Instance for venue '{payload.venue}' already exists")
 
     try:
-        ui_port = allocate_port(db)
+        instance = build_instance(db, payload.venue, payload.agent_id, payload.rtsp_source)
     except NoPortsAvailableError as exc:
-        audit.record(
-            db,
-            actor=actor,
-            action=audit.INSTANCE_CREATE,
-            outcome=AuditOutcome.failure,
-            venue=payload.venue,
-            agent_id=payload.agent_id,
-            detail={"error": str(exc)},
-        )
-        db.commit()
-        raise HTTPException(409, f"{exc} - delete an unused instance or widen the range") from exc
+        raise _create_rejected(
+            db, actor, payload, str(exc), f"{exc} - delete an unused instance or widen the range"
+        ) from exc
 
-    instance = Instance(
-        venue=payload.venue,
-        agent_id=payload.agent_id,
-        rtsp_source=payload.rtsp_source,
-        ui_port=ui_port,
-        compose_project=f"pyca-{payload.venue}",
-        config_dir=str(settings.instances_dir / payload.venue),
-        status=InstanceStatus.stopped,
-    )
     db.add(instance)
     try:
         db.flush()
     except IntegrityError as exc:
         # Lost a race with another create (or the decision engine) for this venue or port.
         db.rollback()
-        raise HTTPException(
-            409, f"Instance for venue '{payload.venue}' was created concurrently - refresh and retry"
+        raise _create_rejected(
+            db,
+            actor,
+            payload,
+            "created concurrently",
+            f"Instance for venue '{payload.venue}' was created concurrently - refresh and retry",
         ) from exc
     audit.record(
         db,
@@ -126,7 +140,7 @@ def create_instance(
 def _get_instance_or_404(db: Session, instance_id: int) -> Instance:
     instance = db.get(Instance, instance_id)
     if not instance:
-        raise HTTPException(404, "Instance not found")
+        raise HTTPException(HTTP_404_NOT_FOUND, "Instance not found")
     return instance
 
 
@@ -137,8 +151,14 @@ def get_instance(instance_id: int, db: Session = Depends(get_db)):
         containers = compose_manager.container_statuses(instance)
     except compose_manager.DockerUnavailableError as exc:
         logger.warning("%s", exc)
-        raise HTTPException(503, "Docker is unavailable, so container status can't be read") from exc
-    return InstanceRuntimeStatus(instance=instance, containers=containers)
+        raise HTTPException(
+            HTTP_503_SERVICE_UNAVAILABLE, "Docker is unavailable, so container status can't be read"
+        ) from exc
+    return InstanceRuntimeStatus(
+        instance=instance,
+        containers=containers,
+        recordings_bytes=dir_size_bytes(recordings_dir(instance)),
+    )
 
 
 @router.post("/{instance_id}/start", response_model=InstanceRead)
@@ -198,7 +218,7 @@ def restart_instance(
     return instance
 
 
-@router.delete("/{instance_id}", status_code=204)
+@router.delete("/{instance_id}", status_code=HTTP_204_NO_CONTENT)
 def delete_instance(
     instance_id: int,
     db: Session = Depends(get_db),
@@ -215,7 +235,7 @@ def delete_instance(
             detail={"error": "instance is running"},
         )
         db.commit()
-        raise HTTPException(409, "Stop the instance before deleting it")
+        raise HTTPException(HTTP_409_CONFLICT, "Stop the instance before deleting it")
     audit.record(db, actor=actor, action=audit.INSTANCE_DELETE, instance=instance)
     db.delete(instance)
     db.commit()

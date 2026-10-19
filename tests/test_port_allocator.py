@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.port_allocator import NoPortsAvailableError, allocate_port
 
 
@@ -20,8 +22,5 @@ def test_raises_when_range_exhausted(monkeypatch):
     monkeypatch.setattr("app.port_allocator.settings.ui_port_range_start", 9000)
     monkeypatch.setattr("app.port_allocator.settings.ui_port_range_end", 9001)
 
-    try:
+    with pytest.raises(NoPortsAvailableError):
         allocate_port(_mock_db([9000, 9001]))
-        assert False, "expected NoPortsAvailableError"
-    except NoPortsAvailableError:
-        pass

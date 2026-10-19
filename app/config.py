@@ -2,6 +2,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The value .env.example ships with for every secret.
+PLACEHOLDER_SECRET = "CHANGE_ME"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -10,7 +13,7 @@ class Settings(BaseSettings):
     opencast_host: str = "octestallinone.virtuos.uos.de"
     opencast_protocol: str = "https"
     opencast_username: str = "opencast_system_account"
-    opencast_password: str = "CHANGE_ME"
+    opencast_password: str = PLACEHOLDER_SECRET
 
     # Opencast, as reached from inside a managed PyCA container.
     opencast_container_host: str | None = None
@@ -20,7 +23,7 @@ class Settings(BaseSettings):
     mysql_host: str = "localhost"
     mysql_port: int = 3306
     mysql_user: str = "pyca_orchestrator"
-    mysql_password: str = "CHANGE_ME"
+    mysql_password: str = PLACEHOLDER_SECRET
     mysql_database: str = "pyca_orchestrator"
 
     # PyCA
@@ -37,6 +40,15 @@ class Settings(BaseSettings):
 
     # Upper bound on one `docker compose` call (up can include an image pull).
     compose_timeout_seconds: int = 300
+
+    # Local dev stacks may genuinely use the placeholder as their password; this downgrades
+    # the startup check from fatal to a warning. Never set it in production.
+    allow_placeholder_secrets: bool = False
+
+    def placeholder_secrets(self) -> list[str]:
+        """Env var names of secrets still set to the placeholder, i.e. never configured."""
+        secrets = {"OPENCAST_PASSWORD": self.opencast_password, "MYSQL_PASSWORD": self.mysql_password}
+        return [name for name, value in secrets.items() if value == PLACEHOLDER_SECRET]
 
     @property
     def opencast_url(self) -> str:

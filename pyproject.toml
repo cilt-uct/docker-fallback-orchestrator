@@ -1,0 +1,20 @@
+# Tool configuration only - the app is run from source, not packaged.
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["dev", "instances"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, import order, bugbear, pyupgrade
+select = ["E", "F", "I", "B", "UP"]
+# B008: FastAPI's `Depends(...)` in argument defaults is the framework's own idiom.
+# UP042: StrEnum would change str(member) from "InstanceStatus.running" to "running" -
+#        a behaviour change, not a style fix; switch deliberately if wanted.
+ignore = ["B008", "UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

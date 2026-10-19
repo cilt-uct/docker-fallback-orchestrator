@@ -6,13 +6,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.config import settings
 from app.database import Base, engine
 from app.decision_engine import run_forever
 from app.errors import register_exception_handlers
 from app.routers import audit, instances, monitoring, web
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("main")
+logger = logging.getLogger(__name__)
 
 
 def _log_engine_exit(task: asyncio.Task) -> None:
@@ -24,6 +25,15 @@ def _log_engine_exit(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail at startup with the actual cause, not later with an Opencast/MySQL login error.
+    if missing := settings.placeholder_secrets():
+        message = (
+            f"{', '.join(missing)} still set to the placeholder - set real values in .env (see .env.example)"
+        )
+        if not settings.allow_placeholder_secrets:
+            raise RuntimeError(message)
+        logger.warning("%s; continuing because ALLOW_PLACEHOLDER_SECRETS is set", message)
+
     # TODO: replace with Alembic migrations once the schema stabilises.
     Base.metadata.create_all(bind=engine)
 

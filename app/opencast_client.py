@@ -8,13 +8,14 @@ across both agents.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
 from app.config import settings
+from app.constants import HTTP_404_NOT_FOUND
 
-logger = logging.getLogger("opencast_client")
+logger = logging.getLogger(__name__)
 
 
 class OpencastError(RuntimeError):
@@ -22,7 +23,7 @@ class OpencastError(RuntimeError):
 
 
 def _iso8601(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _extract_rtsp_source(capabilities: dict | None) -> str | None:
@@ -77,7 +78,7 @@ class OpencastClient:
     async def _get_json(self, path: str, *, allow_404: bool = False, **kwargs):
         try:
             resp = await self._client.get(path, **kwargs)
-            if allow_404 and resp.status_code == 404:
+            if allow_404 and resp.status_code == HTTP_404_NOT_FOUND:
                 return None
             resp.raise_for_status()
             return resp.json()
@@ -89,7 +90,7 @@ class OpencastClient:
             raise OpencastError(f"Opencast sent a non-JSON response for {path}") from exc
 
     async def get_scheduled_events(self) -> list[ScheduledEvent]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # startDate only bounds technical_start; drop finished events below instead.
         earliest = now - timedelta(days=1)
         later = now + timedelta(days=settings.schedule_lookahead_days)

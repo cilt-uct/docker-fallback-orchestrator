@@ -1,6 +1,6 @@
 import logging
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from app import decision_engine
 from app.config import settings
+from app.constants import HTTP_200_OK, HTTP_503_SERVICE_UNAVAILABLE
 from app.database import get_db
+from app.instance_lifecycle import dir_size_bytes, recordings_dir
 from app.models import Instance, InstanceStatus
 
-logger = logging.getLogger("api.monitoring")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
@@ -22,25 +24,7 @@ router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 ENGINE_STALE_POLLS = 3
 
 
-def _dir_size_bytes(path: Path) -> int:
-    # PyCA writes and removes files under here while we walk it, so any entry can
-    # vanish (or be unreadable) between being listed and being stat'ed.
-    total = 0
-    try:
-        for f in path.rglob("*"):
-            try:
-                if f.is_file():
-                    total += f.stat().st_size
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return total
-
-
-def _disk_usage(path: Path | None):
-    if path is None:
-        return None
+def _disk_usage(path: Path) -> tuple[int, int, int] | None:
     try:
         return shutil.disk_usage(path)
     except OSError:
@@ -67,7 +51,7 @@ def ready(request: Request, db: Session = Depends(get_db)):
 
     engine = decision_engine.status
     task = getattr(request.app.state, "engine_task", None)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stale_after = ENGINE_STALE_POLLS * settings.poll_interval_seconds
     if task is not None and task.done():
         engine_ok, engine_error = False, "decision engine is not running"
@@ -87,7 +71,7 @@ def ready(request: Request, db: Session = Depends(get_db)):
 
     all_ok = all(check["ok"] for check in checks.values())
     return JSONResponse(
-        status_code=200 if all_ok else 503,
+        status_code=HTTP_200_OK if all_ok else HTTP_503_SERVICE_UNAVAILABLE,
         content={"status": "ok" if all_ok else "unavailable", "checks": checks},
     )
 
@@ -99,14 +83,14 @@ def summary(db: Session = Depends(get_db)):
     for instance in instances:
         by_status[instance.status.value] += 1
 
-    disk_usage = _disk_usage(Path(instances[0].config_dir).parent if instances else None)
+    # The filesystem that holds every instance's recordings.
+    disk_usage = _disk_usage(settings.instances_dir)
 
     return {
         "instance_count": len(instances),
         "by_status": by_status,
         "recordings_bytes_by_instance": {
-            instance.venue: _dir_size_bytes(Path(instance.config_dir) / "data" / "recordings")
-            for instance in instances
+            instance.venue: dir_size_bytes(recordings_dir(instance)) for instance in instances
         },
         "disk_usage": (
             {"total": disk_usage.total, "used": disk_usage.used, "free": disk_usage.free}

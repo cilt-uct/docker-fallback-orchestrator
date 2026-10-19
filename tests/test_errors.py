@@ -1,54 +1,18 @@
 import asyncio
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from docker.errors import DockerException
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
-from app import audit, compose_manager, decision_engine
-from app.database import get_db
-from app.errors import register_exception_handlers
+from app import audit, compose_manager, decision_engine, instance_lifecycle
 from app.models import AuditEvent, AuditOutcome, Instance, InstanceStatus
-from app.opencast_client import AgentState, OpencastClient, OpencastError, ScheduledEvent
+from app.opencast_client import OpencastClient, OpencastError
 from app.port_allocator import NoPortsAvailableError
 from app.routers import instances as instances_router
-from app.routers import monitoring as monitoring_router
-
-
-def _instance(db, venue="room-1", status=InstanceStatus.stopped, **kwargs):
-    instance = Instance(
-        venue=venue,
-        agent_id=venue,
-        ui_port=9000 + db.query(Instance).count(),
-        compose_project=f"pyca-{venue}",
-        config_dir=f"/tmp/{venue}",
-        status=status,
-        **kwargs,
-    )
-    db.add(instance)
-    db.commit()
-    return instance
-
-
-def _app(db):
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(instances_router.router)
-    app.include_router(monitoring_router.router)
-    app.dependency_overrides[get_db] = lambda: db
-    return app
-
-
-@pytest.fixture
-def client(db):
-    # raise_server_exceptions=False: assert on the 500 a real client would get.
-    return TestClient(_app(db), raise_server_exceptions=False)
-
 
 # ---- API: start/stop/restart failures -------------------------------------------------
 
@@ -67,9 +31,11 @@ def _raise(exc):
         (compose_manager.ComposeTimeoutError("docker compose up -d timed out after 300s for room-1"), 504),
     ],
 )
-def test_compose_failure_keeps_its_message_and_marks_the_instance(client, db, monkeypatch, exc, status_code):
+def test_compose_failure_keeps_its_message_and_marks_the_instance(
+    client, db, monkeypatch, exc, status_code, make_instance
+):
     monkeypatch.setattr(instances_router, "provision_and_start", _raise(exc))
-    instance = _instance(db, rtsp_source="rtsp://cam/s")
+    instance = make_instance(rtsp_source="rtsp://cam/s")
 
     resp = client.post(f"/instances/{instance.id}/start")
 
@@ -81,9 +47,9 @@ def test_compose_failure_keeps_its_message_and_marks_the_instance(client, db, mo
     assert (event.action, event.outcome) == (audit.INSTANCE_START, AuditOutcome.failure)
 
 
-def test_unexpected_failure_is_not_echoed_to_the_client(client, db, monkeypatch, caplog):
+def test_unexpected_failure_is_not_echoed_to_the_client(client, db, monkeypatch, caplog, make_instance):
     monkeypatch.setattr(instances_router.compose_manager, "down", _raise(KeyError("secret-internal-detail")))
-    instance = _instance(db, status=InstanceStatus.running)
+    instance = make_instance(status=InstanceStatus.running)
 
     resp = client.post(f"/instances/{instance.id}/stop")
 
@@ -107,7 +73,9 @@ def test_create_rejects_venues_docker_or_the_filesystem_would_choke_on(client, d
 
 
 def test_create_with_no_free_ports_is_a_conflict_not_a_500(client, db, monkeypatch):
-    monkeypatch.setattr(instances_router, "allocate_port", _raise(NoPortsAvailableError("No free ports in range 9000-9000")))
+    monkeypatch.setattr(
+        instance_lifecycle, "allocate_port", _raise(NoPortsAvailableError("No free ports in range 9000-9000"))
+    )
 
     resp = client.post("/instances", json={"venue": "room-1", "agent_id": "agent-1"})
 
@@ -117,23 +85,27 @@ def test_create_with_no_free_ports_is_a_conflict_not_a_500(client, db, monkeypat
     assert event.outcome == AuditOutcome.failure
 
 
-def test_create_losing_a_race_for_the_port_is_a_conflict(client, db, monkeypatch):
-    taken = _instance(db, venue="room-a")
-    monkeypatch.setattr(instances_router, "allocate_port", lambda db: taken.ui_port)
+def test_create_losing_a_race_for_the_port_is_a_conflict(client, db, monkeypatch, make_instance):
+    taken = make_instance(venue="room-a")
+    monkeypatch.setattr(instance_lifecycle, "allocate_port", lambda db: taken.ui_port)
 
     resp = client.post("/instances", json={"venue": "room-b", "agent_id": "agent-1"})
 
     assert resp.status_code == 409
     assert db.query(Instance).count() == 1
+    (event,) = db.query(AuditEvent).all()
+    assert (event.venue, event.outcome) == ("room-b", AuditOutcome.failure)
 
 
 # ---- API: dependencies down ---------------------------------------------------------
 
 
-def test_details_report_docker_being_down_as_503(client, db, monkeypatch):
-    docker_client = SimpleNamespace(containers=SimpleNamespace(list=_raise(DockerException("daemon not running"))))
+def test_details_report_docker_being_down_as_503(client, db, monkeypatch, make_instance):
+    docker_client = SimpleNamespace(
+        containers=SimpleNamespace(list=_raise(DockerException("daemon not running")))
+    )
     monkeypatch.setattr(compose_manager, "_docker_client", lambda: docker_client)
-    instance = _instance(db)
+    instance = make_instance()
 
     resp = client.get(f"/instances/{instance.id}")
 
@@ -142,7 +114,9 @@ def test_details_report_docker_being_down_as_503(client, db, monkeypatch):
 
 
 def test_database_outage_is_a_json_503(client, db, monkeypatch):
-    monkeypatch.setattr(db, "query", _raise(OperationalError("SELECT 1", {}, Exception("server has gone away"))))
+    monkeypatch.setattr(
+        db, "query", _raise(OperationalError("SELECT 1", {}, Exception("server has gone away")))
+    )
 
     resp = client.get("/instances")
 
@@ -153,14 +127,12 @@ def test_database_outage_is_a_json_503(client, db, monkeypatch):
     assert body["error_id"]
 
 
-def test_unhandled_exception_is_a_json_500_with_a_reference(db, caplog):
-    app = _app(db)
-
+def test_unhandled_exception_is_a_json_500_with_a_reference(app, client, caplog):
     @app.get("/boom")
     def boom():
         raise RuntimeError("secret-internal-detail")
 
-    resp = TestClient(app, raise_server_exceptions=False).get("/boom")
+    resp = client.get("/boom")
 
     assert resp.status_code == 500
     body = resp.json()
@@ -210,8 +182,8 @@ def test_dir_size_survives_files_vanishing_mid_walk(tmp_path, monkeypatch):
         return real_stat(self, *args, **kwargs)
 
     monkeypatch.setattr(type(tmp_path), "stat", flaky_stat)
-    assert monitoring_router._dir_size_bytes(tmp_path) == 5
-    assert monitoring_router._dir_size_bytes(tmp_path / "missing") == 0
+    assert instance_lifecycle.dir_size_bytes(tmp_path) == 5
+    assert instance_lifecycle.dir_size_bytes(tmp_path / "missing") == 0
 
 
 def test_ready_reflects_the_decision_engine(client, monkeypatch):
@@ -223,10 +195,10 @@ def test_ready_reflects_the_decision_engine(client, monkeypatch):
     assert resp.json()["checks"]["decision_engine"]["error"] == "no poll has completed yet"
     assert resp.json()["checks"]["database"]["ok"] is True
 
-    status.last_success_at = datetime.now(timezone.utc)
+    status.last_success_at = datetime.now(UTC)
     assert client.get("/monitoring/ready").status_code == 200
 
-    status.last_success_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    status.last_success_at = datetime.now(UTC) - timedelta(hours=1)
     status.last_error = "Could not reach Opencast"
     resp = client.get("/monitoring/ready")
     assert resp.status_code == 503
@@ -245,8 +217,8 @@ def _opencast(handler):
 
 
 def test_one_malformed_scheduled_event_does_not_hide_the_rest():
-    end = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-    start = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    end = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    start = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     results = [
         {"id": "mp-bad", "agent_id": "room-1", "technical_start": start},  # no technical_end
         {"id": "mp-good", "agent_id": "room-2", "technical_start": start, "technical_end": end},
@@ -274,47 +246,19 @@ def test_opencast_failures_surface_as_opencast_error(handler):
 
 def test_unusable_agent_state_is_an_opencast_error_and_404_is_none():
     with pytest.raises(OpencastError):
-        asyncio.run(_opencast(lambda request: httpx.Response(200, json={"unexpected": 1})).get_agent_state("a"))
+        asyncio.run(
+            _opencast(lambda request: httpx.Response(200, json={"unexpected": 1})).get_agent_state("a")
+        )
     assert asyncio.run(_opencast(lambda request: httpx.Response(404)).get_agent_state("a")) is None
 
 
 # ---- decision engine --------------------------------------------------------------------
 
 
-def _event(agent_id):
-    start = datetime.now(timezone.utc) + timedelta(minutes=5)
-    return ScheduledEvent(
-        mediapackage_id=f"mp-{agent_id}", title="Lecture", agent_id=agent_id, start=start, end=start + timedelta(hours=1)
-    )
-
-
-class _FakeOpencast:
-    def __init__(self, events, states):
-        self.events, self.states = events, states
-
-    async def get_scheduled_events(self):
-        return self.events
-
-    async def get_agent_state(self, agent_id):
-        state = self.states[agent_id]
-        if isinstance(state, Exception):
-            raise state
-        return state
-
-
-@pytest.fixture
-def engine_db(db, monkeypatch):
-    monkeypatch.setattr(decision_engine, "SessionLocal", lambda: db)
-    monkeypatch.setattr(decision_engine, "_teardown_deferred_ids", set())
-    return db
-
-
-def _offline(agent_id):
-    return AgentState(agent_id=agent_id, state="unknown", seconds_since_update=1e9, rtsp_source="rtsp://cam/s")
-
-
-def test_one_venue_failing_does_not_block_the_others_or_teardown(engine_db, monkeypatch):
-    _instance(engine_db, venue="room-idle", status=InstanceStatus.running)
+def test_one_venue_failing_does_not_block_the_others_or_teardown(
+    engine_db, monkeypatch, make_instance, scheduled_event, offline_agent, fake_opencast
+):
+    make_instance(venue="room-idle", status=InstanceStatus.running)
     started, stopped = [], []
 
     def provision(instance):
@@ -327,13 +271,15 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(engine_db, monk
 
     monkeypatch.setattr(decision_engine, "provision_and_start", provision)
     monkeypatch.setattr(decision_engine, "has_pending_ingest", no_pending_ingest)
-    monkeypatch.setattr(decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue))
-    oc = _FakeOpencast(
-        [_event("room-unreachable"), _event("room-explodes"), _event("room-ok")],
+    monkeypatch.setattr(
+        decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue)
+    )
+    oc = fake_opencast(
+        [scheduled_event("room-unreachable"), scheduled_event("room-explodes"), scheduled_event("room-ok")],
         {
             "room-unreachable": OpencastError("Opencast returned HTTP 500"),
-            "room-explodes": _offline("room-explodes"),
-            "room-ok": _offline("room-ok"),
+            "room-explodes": offline_agent("room-explodes"),
+            "room-ok": offline_agent("room-ok"),
         },
     )
 
@@ -349,27 +295,33 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(engine_db, monk
     }
 
 
-def test_instance_left_mid_stop_by_a_crash_is_finished_off(engine_db, monkeypatch):
-    _instance(engine_db, venue="room-stuck", status=InstanceStatus.stopping)
+def test_instance_left_mid_stop_by_a_crash_is_finished_off(
+    engine_db, monkeypatch, make_instance, fake_opencast
+):
+    make_instance(venue="room-stuck", status=InstanceStatus.stopping)
     stopped = []
 
     async def no_pending_ingest(instance):
         return False
 
     monkeypatch.setattr(decision_engine, "has_pending_ingest", no_pending_ingest)
-    monkeypatch.setattr(decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue))
+    monkeypatch.setattr(
+        decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue)
+    )
 
-    asyncio.run(decision_engine.run_once(_FakeOpencast([], {})))
+    asyncio.run(decision_engine.run_once(fake_opencast([], {})))
 
     assert stopped == ["room-stuck"]
     assert engine_db.query(Instance).one().status == InstanceStatus.stopped
 
 
-def test_failing_to_fetch_the_schedule_fails_the_pass_and_touches_nothing(engine_db, monkeypatch):
-    _instance(engine_db, venue="room-1", status=InstanceStatus.running)
+def test_failing_to_fetch_the_schedule_fails_the_pass_and_touches_nothing(
+    engine_db, monkeypatch, make_instance, fake_opencast
+):
+    make_instance(venue="room-1", status=InstanceStatus.running)
     monkeypatch.setattr(decision_engine.compose_manager, "down", _raise(AssertionError("must not tear down")))
 
-    class Down(_FakeOpencast):
+    class Down(fake_opencast):
         async def get_scheduled_events(self):
             raise OpencastError("Could not reach Opencast")
 

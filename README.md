@@ -332,6 +332,23 @@ uvicorn app.main:app --reload --port 8090
 Dashboard: http://localhost:8090/ (8080 is taken by Opencast itself if you're
 also running the local test stack below)
 
+The controller refuses to start while `OPENCAST_PASSWORD` or
+`MYSQL_PASSWORD` is still the `.env.example` placeholder (`CHANGE_ME`). If a
+local dev stack genuinely uses `CHANGE_ME` as its password, set
+`ALLOW_PLACEHOLDER_SECRETS=true` to start anyway with a warning - never in
+production.
+
+### Tests and linting
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q                               # needs no MySQL or Docker
+ruff check . && ruff format --check .   # config in pyproject.toml
+```
+
+CI (`.github/workflows/ci.yml`) runs all three on every push to `main` and
+on pull requests.
+
 ## Configuration
 
 See [.env.example](.env.example) for all settings: Opencast connection,
@@ -381,7 +398,7 @@ only contacted when an instance is acted on or inspected.
 
 Every state-changing action writes a row to `audit_events` in the same
 transaction as the change itself, and emits the same event as a JSON line on
-the `audit` logger. Reads are not audited.
+the `app.audit` logger. Reads are not audited.
 
 Browse it from the dashboard: "Audit log" in the navbar opens `/activity`
 (`templates/web/audit.html` + `static/audit.js`; the navbar is the shared
