@@ -187,14 +187,21 @@ def stop_instance(
     actor: Actor = Depends(operator_actor),
 ):
     instance = _get_instance_or_404(db, instance_id)
+    # Read before the stop is recorded, which resets the "since last stop" window.
+    mediapackage_ids = audit.mediapackages_since_last_stop(db, instance.id)
     try:
         compose_manager.down(instance)
         instance.status = InstanceStatus.stopped
-        instance.mediapackage_id = None
         instance.last_error = None
     except Exception as exc:  # noqa: BLE001 - classified in _action_failed
         raise _action_failed(db, actor, audit.INSTANCE_STOP, "stop", instance, exc) from exc
-    audit.record(db, actor=actor, action=audit.INSTANCE_STOP, instance=instance)
+    audit.record(
+        db,
+        actor=actor,
+        action=audit.INSTANCE_STOP,
+        instance=instance,
+        detail={"mediapackage_ids": mediapackage_ids},
+    )
     db.commit()
     db.refresh(instance)
     return instance

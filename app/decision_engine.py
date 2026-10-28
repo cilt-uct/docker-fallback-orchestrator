@@ -136,7 +136,6 @@ async def _ensure_backup(
         return
 
     instance = _get_or_create_instance(db, event.agent_id, event.agent_id, agent_state.rtsp_source)
-    instance.mediapackage_id = event.mediapackage_id
 
     if instance.status == InstanceStatus.running:
         return
@@ -188,14 +187,17 @@ async def _tear_down_if_idle(db: Session, instance: Instance, deferred_ids: set[
                 instance=instance,
                 detail={
                     "reason": BackupReason.pending_ingest.value,
-                    "mediapackage_id": instance.mediapackage_id,
+                    "mediapackage_ids": audit.mediapackages_since_last_stop(db, instance.id),
                 },
             )
             db.commit()
         return
 
     logger.info("Stopping backup instance for %s (no longer needed)", instance.agent_id)
-    detail = {"reason": BackupReason.no_longer_needed.value, "mediapackage_id": instance.mediapackage_id}
+    detail = {
+        "reason": BackupReason.no_longer_needed.value,
+        "mediapackage_ids": audit.mediapackages_since_last_stop(db, instance.id),
+    }
     instance.status = InstanceStatus.stopping
     db.commit()
     try:
@@ -217,7 +219,6 @@ async def _tear_down_if_idle(db: Session, instance: Instance, deferred_ids: set[
         )
     else:
         instance.status = InstanceStatus.stopped
-        instance.mediapackage_id = None
         audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_STOP, instance=instance, detail=detail)
     db.commit()
 
