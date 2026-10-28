@@ -40,7 +40,6 @@ class Instance(Base):
         Enum(InstanceStatus), default=InstanceStatus.stopped, nullable=False
     )
     rtsp_source: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    mediapackage_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Not rotated on restart - see decision_engine.has_pending_ingest.

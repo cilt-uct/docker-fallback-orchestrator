@@ -34,6 +34,7 @@ const REASON_LABEL = {
 
 const DETAIL_LABEL = {
   mediapackage_id: "Mediapackage",
+  mediapackage_ids: "Mediapackages",
   rtsp_source: "RTSP source",
   ui_port: "UI port",
   from: "From",
@@ -83,8 +84,12 @@ function renderDetail(detail) {
   if (detail.error) parts.push(`<div class="text-danger">${escapeHtml(detail.error)}</div>`);
   Object.entries(detail).forEach(([key, value]) => {
     if (key === "reason" || key === "error" || value === null || value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    const values = Array.isArray(value) ? value : [value];
     parts.push(
-      `<div class="text-secondary">${escapeHtml(DETAIL_LABEL[key] || key)}: <code>${escapeHtml(String(value))}</code></div>`
+      `<div class="text-secondary">${escapeHtml(DETAIL_LABEL[key] || key)}: ${values
+        .map((v) => `<code>${escapeHtml(String(v))}</code>`)
+        .join(" ")}</div>`
     );
   });
   return parts.join("");

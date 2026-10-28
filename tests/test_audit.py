@@ -181,7 +181,23 @@ def test_engine_audits_a_repeating_start_failure_once(
 def test_engine_audits_deferred_teardown_once_then_the_stop(
     engine_db, monkeypatch, make_instance, fake_opencast
 ):
-    make_instance(status=InstanceStatus.running, mediapackage_id="mp-1")
+    instance = make_instance(status=InstanceStatus.running)
+    # It was started for two events, and an older lifetime (closed by a stop) for another.
+    for action, mediapackage_id in (
+        (audit.INSTANCE_START, "mp-old"),
+        (audit.INSTANCE_STOP, None),
+        (audit.INSTANCE_START, "mp-1"),
+        (audit.INSTANCE_START, "mp-2"),
+    ):
+        audit.record(
+            engine_db,
+            actor=audit.SYSTEM,
+            action=action,
+            instance=instance,
+            detail={"mediapackage_id": mediapackage_id} if mediapackage_id else None,
+        )
+    engine_db.commit()
+    seeded = len(_events(engine_db))
     pending = True
 
     async def has_pending_ingest(instance):
@@ -193,13 +209,15 @@ def test_engine_audits_deferred_teardown_once_then_the_stop(
 
     asyncio.run(decision_engine.run_once(oc))
     asyncio.run(decision_engine.run_once(oc))
-    assert [e.action for e in _events(engine_db)] == [audit.INSTANCE_TEARDOWN_DEFERRED]
+    deferred = _events(engine_db)[seeded:]
+    assert [e.action for e in deferred] == [audit.INSTANCE_TEARDOWN_DEFERRED]
+    assert deferred[0].detail["mediapackage_ids"] == ["mp-1", "mp-2"]
 
     pending = False
     asyncio.run(decision_engine.run_once(oc))
     stop = _events(engine_db)[-1]
     assert (stop.action, stop.actor) == (audit.INSTANCE_STOP, "system")
-    assert stop.detail == {"reason": "no_longer_needed", "mediapackage_id": "mp-1"}
+    assert stop.detail == {"reason": "no_longer_needed", "mediapackage_ids": ["mp-1", "mp-2"]}
 
 
 def test_dashboard_links_to_the_audit_log_page(client):
@@ -210,3 +228,24 @@ def test_dashboard_links_to_the_audit_log_page(client):
     page = client.get("/activity")
     assert page.status_code == 200
     assert "/static/audit.js" in page.text
+
+
+def test_manual_stop_records_the_mediapackages_since_the_last_start(client, db, make_instance, monkeypatch):
+    monkeypatch.setattr(instances_router.compose_manager, "down", lambda instance: None)
+    instance = make_instance(status=InstanceStatus.running)
+    audit.record(
+        db,
+        actor=audit.SYSTEM,
+        action=audit.INSTANCE_START,
+        instance=instance,
+        detail={"mediapackage_id": "mp-9"},
+    )
+    db.commit()
+
+    assert client.post(f"/instances/{instance.id}/stop").status_code == 200
+    assert "mediapackage_id" not in client.get("/instances").json()[0]
+
+    stop = _events(db)[-1]
+    assert (stop.action, stop.detail) == (audit.INSTANCE_STOP, {"mediapackage_ids": ["mp-9"]})
+    # A fresh lifetime starts empty once it has been stopped.
+    assert audit.mediapackages_since_last_stop(db, instance.id) == []

@@ -23,7 +23,6 @@ class InstanceRead(BaseModel):
     compose_project: str
     status: InstanceStatus
     rtsp_source: str | None
-    mediapackage_id: str | None
     last_error: str | None
     created_at: datetime
     updated_at: datetime
