@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 
 from app import audit, decision_engine
 from app.models import AuditActorType, AuditEvent, AuditOutcome, Instance, InstanceStatus
@@ -136,19 +137,6 @@ def test_audit_endpoint_filters_and_pages(client, db, make_instance):
     assert [e["id"] for e in page + rest] == [e["id"] for e in newest_first]
 
 
-def test_backup_reason(monkeypatch, scheduled_event):
-    monkeypatch.setattr(decision_engine.settings, "recording_lead_minutes", 15)
-    soon, later = scheduled_event(minutes_to_start=5), scheduled_event(minutes_to_start=120)
-
-    assert decision_engine._backup_reason(later, agent_healthy=True, agent_offline=True) == "agent_offline"
-    assert (
-        decision_engine._backup_reason(soon, agent_healthy=False, agent_offline=False)
-        == "unhealthy_near_start"
-    )
-    assert decision_engine._backup_reason(later, agent_healthy=False, agent_offline=False) is None
-    assert decision_engine._backup_reason(soon, agent_healthy=True, agent_offline=False) is None
-
-
 def test_engine_audits_a_repeating_start_failure_once(
     engine_db, monkeypatch, fake_opencast, scheduled_event, offline_agent
 ):
@@ -179,9 +167,11 @@ def test_engine_audits_a_repeating_start_failure_once(
 
 
 def test_engine_audits_deferred_teardown_once_then_the_stop(
-    engine_db, monkeypatch, make_instance, fake_opencast
+    engine_db, monkeypatch, make_instance, fake_opencast, agent_state, seed_health
 ):
     instance = make_instance(status=InstanceStatus.running)
+    # The agent has been healthy long enough, so only the PyCA's own work holds the backup up.
+    seed_health("room-1", healthy_for=timedelta(hours=25))
     # It was started for two events, and an older lifetime (closed by a stop) for another.
     for action, mediapackage_id in (
         (audit.INSTANCE_START, "mp-old"),
@@ -198,26 +188,29 @@ def test_engine_audits_deferred_teardown_once_then_the_stop(
         )
     engine_db.commit()
     seeded = len(_events(engine_db))
-    pending = True
+    activity = decision_engine.BackupReason.pending_ingest
 
-    async def has_pending_ingest(instance):
-        return pending
+    async def pyca_activity(instance):
+        return activity
 
-    monkeypatch.setattr(decision_engine, "has_pending_ingest", has_pending_ingest)
+    monkeypatch.setattr(decision_engine, "pyca_activity", pyca_activity)
     monkeypatch.setattr(decision_engine.compose_manager, "down", lambda instance: None)
-    oc = fake_opencast([])
+    oc = fake_opencast([], {"room-1": agent_state()})
 
     asyncio.run(decision_engine.run_once(oc))
     asyncio.run(decision_engine.run_once(oc))
     deferred = _events(engine_db)[seeded:]
     assert [e.action for e in deferred] == [audit.INSTANCE_TEARDOWN_DEFERRED]
-    assert deferred[0].detail["mediapackage_ids"] == ["mp-1", "mp-2"]
+    assert deferred[0].detail == {"reason": "pending_ingest", "mediapackage_ids": ["mp-1", "mp-2"]}
 
-    pending = False
+    activity = None
     asyncio.run(decision_engine.run_once(oc))
     stop = _events(engine_db)[-1]
     assert (stop.action, stop.actor) == (audit.INSTANCE_STOP, "system")
-    assert stop.detail == {"reason": "no_longer_needed", "mediapackage_ids": ["mp-1", "mp-2"]}
+    assert stop.detail["reason"] == "no_longer_needed"
+    assert stop.detail["mediapackage_ids"] == ["mp-1", "mp-2"]
+    assert stop.detail["agent_healthy_since"]
+    assert stop.detail["last_needed_lecture_end"] is None
 
 
 def test_dashboard_links_to_the_audit_log_page(client):

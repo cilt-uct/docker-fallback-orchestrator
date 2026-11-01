@@ -35,8 +35,13 @@ class Settings(BaseSettings):
 
     poll_interval_seconds: int = 60
     schedule_lookahead_days: int = 1
-    recording_lead_minutes: int = 15
     agent_offline_seconds: int = 300
+    # A capture agent counts as recovered only after this long continuously healthy;
+    # being down at any point within this window before a lecture also makes that
+    # lecture need a backup.
+    agent_stable_hours: float = 24
+    # Keep a backup this long after the end of the last lecture that needed it.
+    backup_retention_days: float = 4
 
     # Upper bound on one `docker compose` call (up can include an image pull).
     compose_timeout_seconds: int = 300

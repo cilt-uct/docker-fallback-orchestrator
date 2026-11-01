@@ -56,7 +56,9 @@ class AgentState:
 
     @property
     def is_healthy(self) -> bool:
-        return self.state in ("idle", "capturing", "ingesting")
+        # Opencast's capture-admin states. "uploading" is a working agent sending its last
+        # recording; "ingesting" is kept to match the fallback-capture-agent's list.
+        return self.state in ("idle", "capturing", "uploading", "ingesting")
 
     @property
     def is_offline(self) -> bool:

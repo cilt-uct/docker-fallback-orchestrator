@@ -21,7 +21,7 @@ docker.from_env = MagicMock()
 from app import decision_engine  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.errors import register_exception_handlers  # noqa: E402
-from app.models import Instance, InstanceStatus  # noqa: E402 - also registers the tables on Base
+from app.models import AgentHealth, Instance, InstanceStatus, utcnow  # noqa: E402 - also registers tables
 from app.opencast_client import AgentState, ScheduledEvent  # noqa: E402
 from app.routers import audit, instances, monitoring, web  # noqa: E402
 
@@ -102,6 +102,40 @@ def offline_agent():
         return AgentState(
             agent_id=agent_id, state="unknown", seconds_since_update=1e9, rtsp_source=rtsp_source
         )
+
+    return make
+
+
+@pytest.fixture
+def agent_state():
+    """Any agent state; defaults to healthy (idle, reported in seconds ago)."""
+
+    def make(agent_id="room-1", state="idle", seconds_since_update=5, rtsp_source="rtsp://cam/s"):
+        return AgentState(
+            agent_id=agent_id, state=state, seconds_since_update=seconds_since_update, rtsp_source=rtsp_source
+        )
+
+    return make
+
+
+@pytest.fixture
+def seed_health(db):
+    """Pre-existing agent history, as the engine would have recorded it. Ages are timedeltas back from now."""
+
+    def make(agent_id="room-1", healthy_for=None, unhealthy_ago=None, needed_lecture_ended_ago=None):
+        now = utcnow()
+        health = AgentHealth(
+            agent_id=agent_id,
+            last_checked_at=now - timedelta(seconds=30),
+            healthy_since=now - healthy_for if healthy_for is not None else None,
+            last_unhealthy_at=now - unhealthy_ago if unhealthy_ago is not None else None,
+            last_needed_event_end_at=(
+                now - needed_lecture_ended_ago if needed_lecture_ended_ago is not None else None
+            ),
+        )
+        db.add(health)
+        db.commit()
+        return health
 
     return make
 

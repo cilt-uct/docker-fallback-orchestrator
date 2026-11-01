@@ -2,10 +2,10 @@
 
 A FastAPI controller that dynamically manages backup [PyCA](https://github.com/opencast/pyCA)
 instances for Opencast capture agents. It watches the Opencast scheduler and
-capture-admin APIs, and when a venue's hardware capture agent is offline (or
-about to miss a scheduled recording), it spins up a disposable PyCA container
-stack to record that venue's RTSP stream instead - then tears it down once
-it's no longer needed.
+capture-admin APIs, and when a venue's hardware capture agent is offline,
+unhealthy, or was down recently, it spins up a PyCA container stack to record
+that venue's RTSP stream instead - then tears it down once the agent has
+proven stable again (see "When a backup starts and stops").
 
 Sibling project to [fallback-capture-agent](../fallback-capture-agent), which
 solves the same problem by recording RTSP directly with ffmpeg. This project
@@ -69,7 +69,7 @@ commit and in the relevant module:
   instead of the API's `startDate >= now`, so an in-progress recording stays
   counted as "still needed" through its whole window instead of being torn
   down the instant its start time passes.
-- `decision_engine.has_pending_ingest()` now checks the instance's own PyCA
+- The decision engine (now `decision_engine.pyca_activity()`) checks the instance's own PyCA
   UI before tearing it down, so a completed recording sitting in PyCA's
   "paused after recording" state (awaiting manual ingest - backup-mode
   agents never auto-ingest) doesn't get torn down out from under an operator.
@@ -149,6 +149,12 @@ aren't, rather than failing confusingly partway through.
 source .venv/bin/activate
 python dev/e2e_test.py
 ```
+
+Teardown only happens once an agent has been healthy for `AGENT_STABLE_HOURS`
+and `BACKUP_RETENTION_DAYS` have passed (see "When a backup starts and
+stops"), so for a run that checks teardown, start the controller with short
+values, e.g. `AGENT_STABLE_HOURS=0.03 BACKUP_RETENTION_DAYS=0` (about 2
+minutes). With the defaults the backups correctly stay up for days.
 
 What it does, in order: starts a synthetic (non-testsrc, so a passing run
 actually proves the RTSP path rather than coincidentally matching PyCA's
@@ -262,9 +268,9 @@ wall-clock. What that run actually verified:
   `idle` once its stock services were restored.
 - **`GET /monitoring/summary` handled 5 instances fine** (correct
   `by_status` counts, 5 correctly-sized keys in
-  `recordings_bytes_by_instance`) - but see the Known gaps entry below on
-  why that endpoint's per-instance disk walk won't stay cheap as N or
-  recording volume grows further.
+  `recordings_bytes_by_instance`) - though that endpoint walks every
+  instance's recordings directory on each call, so it won't stay cheap as N
+  or recording volume grows further.
 - **Not exercised by this run**: what happens when one of N agents'
   `docker compose up -d` actually fails or hangs (all 5 succeeded
   cleanly here) - the script's per-agent error tracking (see
@@ -272,49 +278,37 @@ wall-clock. What that run actually verified:
   handle that gracefully and keep going on the rest, but a real failure
   injection wasn't tried.
 
-## Known gaps / next steps
+## When a backup starts and stops
 
-- **No migrations yet.** `Base.metadata.create_all()` runs on startup instead
-  of Alembic, and only creates missing *tables*, not missing *columns* on an
-  existing one - so an existing `instances` table needs a manual `ALTER
-  TABLE` for any new column (e.g. `ui_username`/`ui_password`). Fine for
-  iterating on the schema now, not for production.
-- **No auth on the FastAPI app itself.** Anyone who can reach it can start/stop
-  instances. Needs at least a shared-secret or basic auth layer before this
-  is reachable from anywhere but localhost.
-- **Bind-mount permissions.** The PyCA image runs as uid 800 (see its
-  Dockerfile). The generated compose file bind-mounts `./data` to
-  `/var/lib/pyca` (chosen over a named volume so the controller can read
-  recording sizes directly) - on Linux hosts that directory needs to be
-  writable by uid 800, or PyCA will fail to write its sqlite db/recordings.
-- **Controller runs on the host, not containerized**, because it shells out
-  to `docker compose` with paths relative to `INSTANCES_DIR`; running the
-  controller itself inside a container (Docker-outside-of-Docker) means
-  those relative paths resolve against the wrong filesystem unless remapped.
-  See the comment in `docker-compose.yml`.
-- **Decision engine is single-pass per venue.** It doesn't yet distinguish
-  "agent came back mid-recording" from "event ended" - both currently just
-  tear the instance down on the next poll once the agent drops out of the
-  scheduled-events window (teardown itself now correctly waits for any
-  pending manual ingest first - see `has_pending_ingest()`).
-- **No recording handoff/ingest verification.** `has_pending_ingest()` stops
-  the decision engine from tearing an instance down while PyCA still shows
-  a recording "paused after recording", but that only confirms PyCA has
-  *started* ingest, not that Opencast's workflow actually succeeded - a
-  recording could finish uploading and then fail Opencast-side processing
-  with nothing here noticing.
-- **`GET /monitoring/summary`'s disk-usage walk doesn't scale.**
-  `_dir_size_bytes()` in `app/routers/monitoring.py` does a synchronous
-  `Path.rglob("*")` + `stat()` over every instance's `data/recordings`
-  directory, for every instance, on every call to `/monitoring/summary` - and
-  since the dashboard's `static/app.js` polls that endpoint every 5s
-  (`REFRESH_MS`), every open dashboard tab re-triggers the full walk on that
-  cadence. Fine at today's scale (1-2 test instances), but both instance
-  count and per-instance recording volume make this worse linearly, and
-  it's on the request path with no caching. Needs either a cached/debounced
-  size (e.g. refreshed on a slower background timer) or moving the
-  computation off the synchronous request path before instance count or
-  recording volume grows meaningfully.
+The decision engine polls Opencast every `POLL_INTERVAL_SECONDS` and records
+what it sees of each capture agent in the `agent_health` table, because the
+rules below look back in time. "Down" means offline (no report for
+`AGENT_OFFLINE_SECONDS`) or in an unhealthy state - anything but idle,
+capturing or uploading.
+
+**Start.** A scheduled lecture needs a backup if its agent is down now, or was
+down at any point in the `AGENT_STABLE_HOURS` (24h) before the lecture starts -
+even if the agent has since been fixed. The backup is started as soon as such
+a lecture is in the schedule window (`SCHEDULE_LOOKAHEAD_DAYS`).
+
+**Teardown.** A backup is only stopped when all of these hold:
+
+1. its agent has been continuously healthy for `AGENT_STABLE_HOURS` (24h) -
+   any unhealthy sighting restarts the clock, and so does a gap in
+   observations (e.g. the controller was down), since the agent can't be
+   vouched for during it;
+2. `BACKUP_RETENTION_DAYS` (4) have passed since the end of the last lecture
+   that needed the backup;
+3. the backup's own PyCA isn't recording, holding a recording awaiting ingest,
+   or uploading one - and can be reached to confirm that.
+
+So an agent coming back online *during* a recording never stops the backup:
+the recording finishes and waits for ingest, and the backup stays for at least
+24h more. The stop audit event records the agent's `agent_healthy_since` and
+the `last_needed_lecture_end`.
+
+If a pass can't get an agent's current state from Opencast, no start or
+teardown decision is made for it that pass.
 
 ## Running locally
 
@@ -415,9 +409,10 @@ actual browser.
   too, with `outcome: failure` and the error in `detail`.
 - **Actor**: decision-engine actions have `actor_type: system` and
   `actor: "system"`, with the trigger in `detail.reason` (`agent_offline`,
-  `unhealthy_near_start`, `no_longer_needed`, `pending_ingest`). API actions
+  `agent_unhealthy`, `recently_unhealthy`, `no_longer_needed`,
+  `recording_in_progress`, `pending_ingest`, `pyca_unreachable`). API actions
   have `actor_type: operator`, the caller's `source_ip`, and `actor: null` -
-  there's no auth yet (see Known gaps), so there's no name to record.
+  there's no auth on the API yet, so there's no name to record.
 - **History outlives the instance**: `instance_id`/`venue`/`agent_id` are
   snapshots, not foreign keys, so deleting an instance keeps its trail.
 - **Repeats are collapsed**: the engine retries a failed start and re-defers

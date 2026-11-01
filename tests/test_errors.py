@@ -256,9 +256,17 @@ def test_unusable_agent_state_is_an_opencast_error_and_404_is_none():
 
 
 def test_one_venue_failing_does_not_block_the_others_or_teardown(
-    engine_db, monkeypatch, make_instance, scheduled_event, offline_agent, fake_opencast
+    engine_db,
+    monkeypatch,
+    make_instance,
+    scheduled_event,
+    offline_agent,
+    fake_opencast,
+    agent_state,
+    seed_health,
 ):
     make_instance(venue="room-idle", status=InstanceStatus.running)
+    seed_health("room-idle", healthy_for=timedelta(hours=25))  # recovered: due for teardown
     started, stopped = [], []
 
     def provision(instance):
@@ -266,11 +274,11 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(
             raise RuntimeError("unexpected")
         started.append(instance.venue)
 
-    async def no_pending_ingest(instance):
-        return False
+    async def idle_pyca(instance):
+        return None
 
     monkeypatch.setattr(decision_engine, "provision_and_start", provision)
-    monkeypatch.setattr(decision_engine, "has_pending_ingest", no_pending_ingest)
+    monkeypatch.setattr(decision_engine, "pyca_activity", idle_pyca)
     monkeypatch.setattr(
         decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue)
     )
@@ -280,6 +288,7 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(
             "room-unreachable": OpencastError("Opencast returned HTTP 500"),
             "room-explodes": offline_agent("room-explodes"),
             "room-ok": offline_agent("room-ok"),
+            "room-idle": agent_state("room-idle"),
         },
     )
 
@@ -296,20 +305,21 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(
 
 
 def test_instance_left_mid_stop_by_a_crash_is_finished_off(
-    engine_db, monkeypatch, make_instance, fake_opencast
+    engine_db, monkeypatch, make_instance, fake_opencast, agent_state, seed_health
 ):
     make_instance(venue="room-stuck", status=InstanceStatus.stopping)
+    seed_health("room-stuck", healthy_for=timedelta(hours=25))
     stopped = []
 
-    async def no_pending_ingest(instance):
-        return False
+    async def idle_pyca(instance):
+        return None
 
-    monkeypatch.setattr(decision_engine, "has_pending_ingest", no_pending_ingest)
+    monkeypatch.setattr(decision_engine, "pyca_activity", idle_pyca)
     monkeypatch.setattr(
         decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue)
     )
 
-    asyncio.run(decision_engine.run_once(fake_opencast([], {})))
+    asyncio.run(decision_engine.run_once(fake_opencast([], {"room-stuck": agent_state("room-stuck")})))
 
     assert stopped == ["room-stuck"]
     assert engine_db.query(Instance).one().status == InstanceStatus.stopped
