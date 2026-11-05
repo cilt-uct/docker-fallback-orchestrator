@@ -523,7 +523,6 @@ async function showDetails(id) {
     body.innerHTML = `
       <dl class="row mb-3">
         <dt class="col-sm-4">Compose project</dt><dd class="col-sm-8"><code>${escapeHtml(data.instance.compose_project)}</code></dd>
-        <dt class="col-sm-4">Mediapackage</dt><dd class="col-sm-8"><code>${escapeHtml(data.instance.mediapackage_id || "–")}</code></dd>
         <dt class="col-sm-4">Recordings size</dt><dd class="col-sm-8">${formatBytes(data.recordings_bytes)}</dd>
       </dl>
       <table class="table table-sm align-middle">

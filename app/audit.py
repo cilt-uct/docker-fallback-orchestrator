@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AuditActorType, AuditEvent, AuditOutcome, Instance
@@ -53,6 +54,37 @@ def redact_url(url: str | None) -> str | None:
     if "@" not in parts.netloc:
         return url
     return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+def mediapackages_since_last_stop(db: Session, instance_id: int) -> list[str]:
+    """Mediapackage IDs of the events this instance was successfully started for since it
+    was last stopped, oldest first.
+
+    An instance doesn't store "its" mediapackage: one running PyCA can record several
+    events, so start/stop audit events carry the IDs instead and this reads them back.
+    """
+    last_stop_id = db.scalar(
+        select(AuditEvent.id)
+        .where(
+            AuditEvent.instance_id == instance_id,
+            AuditEvent.action == INSTANCE_STOP,
+            AuditEvent.outcome == AuditOutcome.success,
+        )
+        .order_by(AuditEvent.id.desc())
+        .limit(1)
+    )
+    starts = db.scalars(
+        select(AuditEvent)
+        .where(
+            AuditEvent.instance_id == instance_id,
+            AuditEvent.action == INSTANCE_START,
+            AuditEvent.outcome == AuditOutcome.success,
+            AuditEvent.id > (last_stop_id or 0),
+        )
+        .order_by(AuditEvent.id)
+    )
+    ids = [(event.detail or {}).get("mediapackage_id") for event in starts]
+    return list(dict.fromkeys(i for i in ids if i))
 
 
 def record(

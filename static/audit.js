@@ -24,18 +24,26 @@ const ACTION_LABEL = {
   "instance.teardown_deferred": "Teardown deferred",
 };
 
-// One entry per BackupReason in app/decision_engine.py.
+// One entry per BackupReason in app/decision_engine.py, plus retired values that
+// older audit events still carry.
 const REASON_LABEL = {
   agent_offline: "Agent offline",
-  unhealthy_near_start: "Agent unhealthy close to recording start",
-  no_longer_needed: "Backup no longer needed",
-  pending_ingest: "Recording awaiting manual ingest",
+  agent_unhealthy: "Agent unhealthy",
+  recently_unhealthy: "Agent was down within 24h of the lecture",
+  no_longer_needed: "Agent recovered - backup no longer needed",
+  recording_in_progress: "Backup is recording",
+  pending_ingest: "Recording awaiting ingest or uploading",
+  pyca_unreachable: "Backup's PyCA could not be reached",
+  unhealthy_near_start: "Agent unhealthy close to recording start", // retired
 };
 
 const DETAIL_LABEL = {
   mediapackage_id: "Mediapackage",
+  mediapackage_ids: "Mediapackages",
   rtsp_source: "RTSP source",
   ui_port: "UI port",
+  agent_healthy_since: "Agent healthy since (UTC)",
+  last_needed_lecture_end: "Last lecture that needed it ended (UTC)",
   from: "From",
   to: "To",
 };
@@ -83,8 +91,12 @@ function renderDetail(detail) {
   if (detail.error) parts.push(`<div class="text-danger">${escapeHtml(detail.error)}</div>`);
   Object.entries(detail).forEach(([key, value]) => {
     if (key === "reason" || key === "error" || value === null || value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    const values = Array.isArray(value) ? value : [value];
     parts.push(
-      `<div class="text-secondary">${escapeHtml(DETAIL_LABEL[key] || key)}: <code>${escapeHtml(String(value))}</code></div>`
+      `<div class="text-secondary">${escapeHtml(DETAIL_LABEL[key] || key)}: ${values
+        .map((v) => `<code>${escapeHtml(String(v))}</code>`)
+        .join(" ")}</div>`
     );
   });
   return parts.join("");
