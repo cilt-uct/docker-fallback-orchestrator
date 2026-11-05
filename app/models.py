@@ -42,12 +42,32 @@ class Instance(Base):
     rtsp_source: Mapped[str | None] = mapped_column(String(512), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Not rotated on restart - see decision_engine.has_pending_ingest.
+    # Not rotated on restart - see decision_engine.pyca_activity.
     ui_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ui_password: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AgentHealth(Base):
+    """What the decision engine has observed about one capture agent's health over time.
+
+    Opencast only reports an agent's *current* state, but the backup rules look back
+    ("down at any point in the last 24 hours", "healthy for 24 hours"), so the engine
+    records its own observations here. One row per agent ID.
+    """
+
+    __tablename__ = "agent_health"
+
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Last time the agent was seen offline or in an unhealthy state.
+    last_unhealthy_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Start of the current unbroken run of healthy observations; None while unhealthy.
+    healthy_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # End of the latest scheduled event that needed a backup.
+    last_needed_event_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AuditActorType(str, enum.Enum):
