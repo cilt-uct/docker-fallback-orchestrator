@@ -244,12 +244,53 @@ def test_opencast_failures_surface_as_opencast_error(handler):
         asyncio.run(_opencast(handler).get_scheduled_events())
 
 
-def test_unusable_agent_state_is_an_opencast_error_and_404_is_none():
+def _agent(name, state="idle", ms_since_update=5000, src=None):
+    agent = {"name": name, "state": state, "time-since-last-update": ms_since_update}
+    if src:
+        agent["capabilities"] = {"item": {"key": "capture.device.presenter.src", "value": src}}
+    return agent
+
+
+def test_agent_list_is_parsed_in_one_request():
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        agents = [_agent("room-1", src="rtsp://cam/1"), _agent("room-2", "offline", 600_000)]
+        return httpx.Response(200, json={"agents": {"agent": agents}})
+
+    states = asyncio.run(_opencast(handler).get_agent_states())
+
+    assert requests == ["/capture-admin/agents.json"]
+    assert sorted(states) == ["room-1", "room-2"]
+    assert (states["room-1"].rtsp_source, states["room-1"].is_healthy) == ("rtsp://cam/1", True)
+    assert (states["room-2"].seconds_since_update, states["room-2"].is_offline) == (600, True)
+
+
+@pytest.mark.parametrize(
+    ("agents", "expected"),
+    [
+        ({"agent": _agent("room-1")}, ["room-1"]),  # a single agent arrives as a bare object
+        ("", []),  # Opencast's "no agents"
+        ({"agent": [_agent("room-1"), {"name": "room-bad"}]}, ["room-1"]),  # malformed one skipped
+    ],
+)
+def test_agent_list_quirks(agents, expected):
+    handler = lambda request: httpx.Response(200, json={"agents": agents})  # noqa: E731
+    assert sorted(asyncio.run(_opencast(handler).get_agent_states())) == expected
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        lambda request: httpx.Response(500),
+        lambda request: httpx.Response(200, json={"agents": ["not", "a", "dict"]}),
+        _raise(httpx.ConnectError("refused")),
+    ],
+)
+def test_unusable_agent_list_is_an_opencast_error(handler):
     with pytest.raises(OpencastError):
-        asyncio.run(
-            _opencast(lambda request: httpx.Response(200, json={"unexpected": 1})).get_agent_state("a")
-        )
-    assert asyncio.run(_opencast(lambda request: httpx.Response(404)).get_agent_state("a")) is None
+        asyncio.run(_opencast(handler).get_agent_states())
 
 
 # ---- decision engine --------------------------------------------------------------------
@@ -282,10 +323,10 @@ def test_one_venue_failing_does_not_block_the_others_or_teardown(
     monkeypatch.setattr(
         decision_engine.compose_manager, "down", lambda instance: stopped.append(instance.venue)
     )
+    # room-unknown has a lecture but Opencast doesn't list its agent: skipped, not fatal.
     oc = fake_opencast(
-        [scheduled_event("room-unreachable"), scheduled_event("room-explodes"), scheduled_event("room-ok")],
+        [scheduled_event("room-unknown"), scheduled_event("room-explodes"), scheduled_event("room-ok")],
         {
-            "room-unreachable": OpencastError("Opencast returned HTTP 500"),
             "room-explodes": offline_agent("room-explodes"),
             "room-ok": offline_agent("room-ok"),
             "room-idle": agent_state("room-idle"),

@@ -32,7 +32,12 @@ from sqlalchemy.orm import Session
 from app import audit, compose_manager
 from app.config import settings
 from app.database import SessionLocal
-from app.instance_lifecycle import InstanceNotStartableError, build_instance, provision_and_start
+from app.instance_lifecycle import (
+    InstanceNotStartableError,
+    build_instance,
+    ensure_ui_credentials,
+    provision_and_start,
+)
 from app.models import AgentHealth, AuditOutcome, Instance, InstanceStatus, utcnow
 from app.opencast_client import AgentState, OpencastClient, OpencastError, ScheduledEvent
 
@@ -174,7 +179,10 @@ status = EngineStatus()
 async def pyca_activity(instance: Instance) -> BackupReason | None:
     """What the instance's own PyCA is still doing that a teardown would interrupt, if anything."""
     if not instance.ui_username or not instance.ui_password:
-        return None
+        # Can't log in to check, so assume it may be busy. Only a crash mid-start (before
+        # credentials were saved) leaves an active backup like this - it needs stopping by hand.
+        logger.warning("No PyCA credentials stored for %s, leaving it running to be safe", instance.venue)
+        return BackupReason.pyca_unreachable
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
@@ -216,6 +224,8 @@ async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, 
     # A failed start is retried every poll - only audit it when the error changes.
     previous_error = instance.last_error if instance.status == InstanceStatus.error else None
     instance.status = InstanceStatus.starting
+    # Saved with "starting", before Docker is touched - see ensure_ui_credentials.
+    ensure_ui_credentials(instance)
     db.commit()
     try:
         provision_and_start(instance)
@@ -302,21 +312,17 @@ async def _tear_down_if_done(
 
 
 async def _observe_agents(
-    db: Session, oc: OpencastClient, agent_ids: set[str], now: datetime
+    db: Session, oc: OpencastClient, now: datetime
 ) -> dict[str, tuple[AgentState, AgentHealth]]:
-    """Fetch and record the current state of each agent. Agents Opencast doesn't know, or
-    whose state can't be fetched this pass, are left out - no decision is made about them."""
-    observed = {}
-    for agent_id in sorted(agent_ids):
-        try:
-            state = await oc.get_agent_state(agent_id)
-        except OpencastError as exc:
-            logger.warning("Skipping agent %s this poll: %s", agent_id, exc)
-            continue
-        if state is None:
-            logger.warning("No agent state for %s, skipping", agent_id)
-            continue
-        observed[agent_id] = (state, observe_agent(db, state, now))
+    """Fetch every agent's current state in one request and record it.
+
+    All agents are observed every pass, not only those with a lecture in the window or
+    a backup, so the look-back rules have history whatever the settings. Raises
+    OpencastError if the list can't be fetched; an agent missing from it is simply not
+    observed, and no decision is made about it.
+    """
+    states = await oc.get_agent_states()
+    observed = {agent_id: (state, observe_agent(db, state, now)) for agent_id, state in states.items()}
     db.commit()
     return observed
 
@@ -329,12 +335,10 @@ async def run_once(oc: OpencastClient) -> None:
         events = await oc.get_scheduled_events()
         now = utcnow()
 
-        active = db.query(Instance).filter(Instance.status.in_(ACTIVE_STATUSES)).all()
-        active_ids = [instance.id for instance in active]
-        # Agents with a backup are observed even with nothing scheduled: their teardown
-        # depends on how long they've been healthy.
-        agent_ids = {e.agent_id for e in events} | {instance.agent_id for instance in active}
-        observed = await _observe_agents(db, oc, agent_ids, now)
+        active_ids = [
+            instance.id for instance in db.query(Instance).filter(Instance.status.in_(ACTIVE_STATUSES))
+        ]
+        observed = await _observe_agents(db, oc, now)
 
         for event in events:
             if event.agent_id not in observed:

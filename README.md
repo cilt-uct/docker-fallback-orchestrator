@@ -281,8 +281,9 @@ wall-clock. What that run actually verified:
 ## When a backup starts and stops
 
 The decision engine polls Opencast every `POLL_INTERVAL_SECONDS` and records
-what it sees of each capture agent in the `agent_health` table, because the
-rules below look back in time. "Down" means offline (no report for
+what it sees of **every** capture agent - one `capture-admin/agents.json`
+request per pass, whether or not the agent has a lecture coming up - in the
+`agent_health` table, because the rules below look back in time. "Down" means offline (no report for
 `AGENT_OFFLINE_SECONDS`) or in an unhealthy state - anything but idle,
 capturing or uploading.
 
@@ -307,8 +308,11 @@ the recording finishes and waits for ingest, and the backup stays for at least
 24h more. The stop audit event records the agent's `agent_healthy_since` and
 the `last_needed_lecture_end`.
 
-If a pass can't get an agent's current state from Opencast, no start or
-teardown decision is made for it that pass.
+If Opencast doesn't list an agent, no start or teardown decision is made for
+it that pass; if the agent list can't be fetched at all, the pass fails and
+nothing changes. A backup's PyCA UI credentials are saved before Docker
+starts it, and an active backup with none stored is treated as busy (it can't
+be checked), so it is never torn down unchecked.
 
 ## Running locally
 

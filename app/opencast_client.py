@@ -1,5 +1,5 @@
 """Thin client for the two Opencast APIs the orchestrator needs:
-Capture Agent state (capture-admin) and the event scheduler (admin-ng).
+capture agent states (capture-admin) and the event scheduler (admin-ng).
 
 Mirrors the request shape used by the existing Node.js fallback-capture-agent
 (see cilt-uct/fallback-capture-agent server.js) so behaviour stays consistent
@@ -13,7 +13,6 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from app.config import settings
-from app.constants import HTTP_404_NOT_FOUND
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +76,9 @@ class OpencastClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _get_json(self, path: str, *, allow_404: bool = False, **kwargs):
+    async def _get_json(self, path: str, **kwargs):
         try:
             resp = await self._client.get(path, **kwargs)
-            if allow_404 and resp.status_code == HTTP_404_NOT_FOUND:
-                return None
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
@@ -126,18 +123,32 @@ class OpencastClient:
                 logger.warning("Skipping malformed scheduled event %r: %r", event, exc)
         return events
 
-    async def get_agent_state(self, agent_id: str) -> AgentState | None:
-        body = await self._get_json(f"/capture-admin/agents/{agent_id}.json", allow_404=True)
-        if body is None:
-            return None
+    async def get_agent_states(self) -> dict[str, AgentState]:
+        """Every capture agent Opencast knows, by agent ID - one request however many there are.
 
-        try:
-            update = body["agent-state-update"]
-            return AgentState(
-                agent_id=agent_id,
-                state=update["state"],
-                seconds_since_update=float(update["time-since-last-update"]) / 1000,
-                rtsp_source=_extract_rtsp_source(update.get("capabilities")),
-            )
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise OpencastError(f"Opencast sent an unusable state for agent {agent_id}: {exc!r}") from exc
+        A single malformed agent is skipped rather than failing the list.
+        """
+        body = await self._get_json("/capture-admin/agents.json")
+        agents = body.get("agents") if isinstance(body, dict) else None
+        if agents in (None, ""):  # Opencast sends "" rather than an empty list when there are none
+            return {}
+        if not isinstance(agents, dict):
+            raise OpencastError("Opencast sent an unexpected shape for the capture agent list")
+        # Same quirk as capabilities: a single agent comes as a bare object, not a list.
+        items = agents.get("agent") or []
+        if isinstance(items, dict):
+            items = [items]
+
+        states = {}
+        for item in items:
+            try:
+                agent_id = item["name"]
+                states[agent_id] = AgentState(
+                    agent_id=agent_id,
+                    state=item["state"],
+                    seconds_since_update=float(item["time-since-last-update"]) / 1000,
+                    rtsp_source=_extract_rtsp_source(item.get("capabilities")),
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("Skipping malformed capture agent %r: %r", item, exc)
+        return states

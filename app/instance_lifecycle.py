@@ -36,15 +36,22 @@ def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | No
     )
 
 
+def ensure_ui_credentials(instance: Instance) -> None:
+    """Give the instance its PyCA UI login if it has none. Existing credentials are kept, not
+    rotated on restart: operators log in with them and the decision engine uses them to check
+    the backup's PyCA before teardown. Callers should commit before starting Docker, so a
+    crash mid-start can't leave a running PyCA whose password the database doesn't know."""
+    if not instance.ui_username or not instance.ui_password:
+        instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
+
+
 def provision_and_start(instance: Instance) -> None:
     if not instance.rtsp_source:
         raise InstanceNotStartableError(
             f"No RTSP source known for agent '{instance.agent_id}' - refusing to start "
             "a backup that could never capture anything"
         )
-    # Reuse existing UI credentials instead of rotating them on each restart.
-    if not instance.ui_username or not instance.ui_password:
-        instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
+    ensure_ui_credentials(instance)
     pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
     compose_manager.render_compose_file(instance)
     compose_manager.up(instance)

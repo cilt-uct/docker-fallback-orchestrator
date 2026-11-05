@@ -141,20 +141,22 @@ def seed_health(db):
 
 
 class FakeOpencast:
-    """Stands in for OpencastClient. `states` maps agent_id to an AgentState, or an exception to raise."""
+    """Stands in for OpencastClient. `states` maps agent_id to AgentState for every agent Opencast
+    lists, or is an exception the whole agent-list request raises. Counts agent-list requests."""
 
     def __init__(self, events, states=None):
         self.events = events
-        self.states = states or {}
+        self.states = states if states is not None else {}
+        self.agent_list_calls = 0
 
     async def get_scheduled_events(self):
         return self.events
 
-    async def get_agent_state(self, agent_id):
-        state = self.states.get(agent_id)
-        if isinstance(state, Exception):
-            raise state
-        return state
+    async def get_agent_states(self):
+        self.agent_list_calls += 1
+        if isinstance(self.states, Exception):
+            raise self.states
+        return dict(self.states)
 
 
 @pytest.fixture

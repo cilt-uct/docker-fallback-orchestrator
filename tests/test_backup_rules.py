@@ -215,3 +215,75 @@ def test_no_decision_without_the_agents_current_state(
     # Opencast doesn't report the agent this pass: keep the backup rather than guess.
     assert engine(fake_opencast([], {}))["stopped"] == []
     assert _status(engine_db) == InstanceStatus.running
+
+
+# ---- review fixes (PR #3) ---------------------------------------------------------------
+
+
+def test_agents_are_observed_with_no_lecture_or_backup_so_a_later_lecture_sees_the_outage(
+    engine, engine_db, fake_opencast, agent_state, offline_agent, scheduled_event, monkeypatch
+):
+    """An outage before a lecture enters the schedule window still counts towards it - here
+    with a stability window (48h) longer than the one-day lookahead."""
+    monkeypatch.setattr(decision_engine.settings, "agent_stable_hours", 48)
+
+    # Down, with nothing scheduled and no backup: previously this agent wasn't even looked at.
+    engine(fake_opencast([], {"room-1": offline_agent()}))
+    assert engine_db.get(AgentHealth, "room-1").last_unhealthy_at is not None
+    assert engine_db.query(Instance).count() == 0
+
+    # Recovered, and now a lecture 20h away enters the window: it still needs a backup.
+    calls = engine(fake_opencast([scheduled_event(minutes_to_start=20 * 60)], {"room-1": agent_state()}))
+    assert calls["started"] == ["room-1"]
+
+
+def test_all_agent_states_come_from_one_request_per_pass(
+    engine, fake_opencast, offline_agent, scheduled_event
+):
+    venues = [f"room-{n}" for n in range(5)]
+    oc = fake_opencast([scheduled_event(v) for v in venues], {v: offline_agent(v) for v in venues})
+
+    calls = engine(oc)
+
+    assert oc.agent_list_calls == 1
+    assert sorted(calls["started"]) == venues
+
+
+def test_failing_to_fetch_the_agent_list_fails_the_pass_and_touches_nothing(
+    engine, engine_db, make_instance, fake_opencast, scheduled_event, seed_health
+):
+    make_instance(status=InstanceStatus.running)
+    seed_health(healthy_for=timedelta(days=5))
+
+    with pytest.raises(decision_engine.OpencastError):
+        engine(fake_opencast([scheduled_event()], decision_engine.OpencastError("agents.json: HTTP 500")))
+
+    assert engine.calls["started"] == engine.calls["stopped"] == []
+    assert _status(engine_db) == InstanceStatus.running
+
+
+class _CrashMidStart(BaseException):
+    """Stands in for the process dying while Docker is starting the backup."""
+
+
+def test_ui_credentials_are_saved_before_docker_is_started(
+    engine_db, monkeypatch, fake_opencast, offline_agent, scheduled_event
+):
+    def crash(instance):
+        raise _CrashMidStart
+
+    monkeypatch.setattr(decision_engine, "provision_and_start", crash)
+
+    with pytest.raises(_CrashMidStart):
+        asyncio.run(decision_engine.run_once(fake_opencast([scheduled_event()], {"room-1": offline_agent()})))
+
+    engine_db.rollback()  # drop anything not committed before the "crash"
+    instance = engine_db.query(Instance).one()
+    assert instance.status == InstanceStatus.starting
+    assert instance.ui_username and instance.ui_password
+
+
+def test_backup_without_stored_credentials_is_treated_as_busy(make_instance):
+    instance = make_instance(status=InstanceStatus.running)  # no ui_username/ui_password
+
+    assert asyncio.run(decision_engine.pyca_activity(instance)) == BackupReason.pyca_unreachable
