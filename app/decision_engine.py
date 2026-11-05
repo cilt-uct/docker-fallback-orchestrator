@@ -12,9 +12,13 @@ as such a lecture is in the schedule window.
 Teardown - a running backup is only stopped once ALL of these hold:
   - its agent has been continuously healthy for AGENT_STABLE_HOURS,
   - BACKUP_RETENTION_DAYS have passed since the end of the last lecture
-    that needed it, and
-  - its PyCA isn't recording, holding a recording awaiting ingest, or
-    uploading one.
+    that needed it,
+  - its PyCA isn't recording, or ingesting (queued or uploading), right now, and
+  - it wasn't started by hand from the dashboard - those stay up until
+    stopped by hand.
+A finished recording waiting for an operator doesn't hold a backup up: it and
+PyCA's state stay on the server, and starting the backup again from the
+dashboard brings its PyCA UI back to ingest it.
 
 "Healthy" uses the same agent states as the Node.js fallback-capture-agent
 (isAgentHealthy / isUpdateLate in server.js), plus "uploading".
@@ -55,19 +59,16 @@ class BackupReason(str, enum.Enum):
     # Why a backup was stopped, or held back from stopping.
     no_longer_needed = "no_longer_needed"
     recording_in_progress = "recording_in_progress"
-    pending_ingest = "pending_ingest"
+    ingest_in_progress = "ingest_in_progress"
     pyca_unreachable = "pyca_unreachable"
+    started_by_operator = "started_by_operator"
 
 
-# PyCA event statuses that mean the backup still holds a recording someone needs.
+# PyCA event statuses for work a teardown would interrupt. Anything else - including a
+# recording "paused after recording" waiting for someone to ingest it - is safe on disk.
 PYCA_RECORDING_STATUSES = {"recording"}
-PYCA_UNFINISHED_STATUSES = {
-    "finished recording",
-    "partial recording",
-    "paused after recording",
-    "uploading",
-    "failed uploading",
-}
+# "finished recording": ingest was triggered and PyCA's ingest service hasn't picked it up yet.
+PYCA_INGESTING_STATUSES = {"finished recording", "uploading"}
 
 # "starting"/"stopping" are included as leftovers from a pass that died mid-transition
 # (crash, lost DB connection); `compose down` is idempotent, so they're treated like
@@ -194,10 +195,15 @@ async def pyca_activity(instance: Instance) -> BackupReason | None:
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         logger.warning("Could not reach PyCA for %s, leaving it running to be safe: %s", instance.venue, exc)
         return BackupReason.pyca_unreachable
+    return activity_from_statuses(statuses)
+
+
+def activity_from_statuses(statuses: set[str]) -> BackupReason | None:
+    """Which of PyCA's event statuses, if any, mean a teardown would interrupt work."""
     if statuses & PYCA_RECORDING_STATUSES:
         return BackupReason.recording_in_progress
-    if statuses & PYCA_UNFINISHED_STATUSES:
-        return BackupReason.pending_ingest
+    if statuses & PYCA_INGESTING_STATUSES:
+        return BackupReason.ingest_in_progress
     return None
 
 
@@ -255,9 +261,14 @@ async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, 
 async def _tear_down_if_done(
     db: Session, instance: Instance, health: AgentHealth | None, now: datetime, deferred_ids: set[int]
 ) -> None:
-    """Stop one backup if its agent has recovered for long enough and nothing it holds would be lost."""
+    """Stop one backup if its agent has recovered for long enough and it isn't busy."""
     if blocker := _teardown_blocker(health, now):
         logger.debug("Keeping backup instance for %s: %s", instance.agent_id, blocker)
+        return
+
+    if audit.started_by_operator(db, instance.id):
+        # E.g. brought back to ingest an old recording - the operator stops it when done.
+        logger.debug("Keeping backup instance for %s: started by hand", instance.agent_id)
         return
 
     if activity := await pyca_activity(instance):

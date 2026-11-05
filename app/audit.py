@@ -58,6 +58,26 @@ def redact_url(url: str | None) -> str | None:
     return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
 
 
+def started_by_operator(db: Session, instance_id: int) -> bool:
+    """True if the instance's most recent successful start or stop was an operator's Start.
+
+    Such a backup is left for the operator to stop, not torn down automatically. A later
+    stop (by anyone) or an automatic start ends that. Read from the audit log, so it needs
+    no extra state on the instance.
+    """
+    last = db.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.instance_id == instance_id,
+            AuditEvent.action.in_([INSTANCE_START, INSTANCE_STOP]),
+            AuditEvent.outcome == AuditOutcome.success,
+        )
+        .order_by(AuditEvent.id.desc())
+        .limit(1)
+    )
+    return last is not None and last.action == INSTANCE_START and last.actor_type == AuditActorType.operator
+
+
 def mediapackages_since_last_stop(db: Session, instance_id: int) -> list[str]:
     """Mediapackage IDs of the events this instance was successfully started for since it
     was last stopped, oldest first.

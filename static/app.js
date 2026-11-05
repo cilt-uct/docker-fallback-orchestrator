@@ -169,6 +169,7 @@ function populateRow(tr, inst, bytes) {
   } else {
     badge.removeAttribute("title");
   }
+  tr.querySelector('[data-field="manual-badge"]').classList.toggle("d-none", !inst.started_by_operator);
 
   const errorEl = tr.querySelector('[data-field="last_error"]');
   errorEl.textContent = inst.status === "error" && inst.last_error ? inst.last_error : "";

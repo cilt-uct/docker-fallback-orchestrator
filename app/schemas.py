@@ -26,6 +26,8 @@ class InstanceRead(BaseModel):
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    # Started by hand, so the decision engine won't tear it down (see audit.started_by_operator).
+    started_by_operator: bool = False
 
 
 class InstanceRuntimeStatus(BaseModel):

@@ -21,8 +21,12 @@ camera instead, and removes it once the agent has proven stable again.
 4. **Stop the backup** only when all of these are true:
    - the capture agent has been healthy for 24 hours without interruption;
    - 4 days have passed since the last lecture that needed the backup;
-   - the backup isn't recording, uploading, or holding a recording that
-     hasn't been ingested.
+   - the backup isn't recording or ingesting right now.
+
+   Recordings waiting to be ingested don't keep a backup up: they stay on
+   the server. To ingest one after its backup has stopped, press **Start** on
+   the dashboard - a backup started by hand stays up (marked *Manual*) until
+   someone stops it.
 5. **Clean up.** Recordings are deleted 7 days after they were made, whether
    or not they were ingested. Operators can change that per recording, or
    delete one straight away, on the Recordings page.

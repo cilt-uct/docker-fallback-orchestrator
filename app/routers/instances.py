@@ -74,7 +74,18 @@ def _action_failed(
 
 @router.get("", response_model=list[InstanceRead])
 def list_instances(db: Session = Depends(get_db)):
-    return db.query(Instance).all()
+    instances = db.query(Instance).all()
+    for instance in instances:
+        _mark_operator_hold(db, instance)
+    return instances
+
+
+def _mark_operator_hold(db: Session, instance: Instance) -> Instance:
+    """Expose whether the instance is held up by a manual start (InstanceRead.started_by_operator)."""
+    instance.started_by_operator = instance.status == InstanceStatus.running and audit.started_by_operator(
+        db, instance.id
+    )
+    return instance
 
 
 def _create_rejected(

@@ -34,7 +34,9 @@ const REASON_LABEL = {
   recently_unhealthy: "Agent was down within 24h of the lecture",
   no_longer_needed: "Agent recovered - backup no longer needed",
   recording_in_progress: "Backup is recording",
-  pending_ingest: "Recording awaiting ingest or uploading",
+  ingest_in_progress: "Backup is ingesting a recording",
+  started_by_operator: "Started by hand - stays up until stopped",
+  pending_ingest: "Recording awaiting ingest or uploading", // retired
   pyca_unreachable: "Backup's PyCA could not be reached",
   unhealthy_near_start: "Agent unhealthy close to recording start", // retired
 };

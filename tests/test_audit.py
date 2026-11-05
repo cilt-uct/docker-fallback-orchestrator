@@ -188,7 +188,7 @@ def test_engine_audits_deferred_teardown_once_then_the_stop(
         )
     engine_db.commit()
     seeded = len(_events(engine_db))
-    activity = decision_engine.BackupReason.pending_ingest
+    activity = decision_engine.BackupReason.ingest_in_progress
 
     async def pyca_activity(instance):
         return activity
@@ -201,7 +201,7 @@ def test_engine_audits_deferred_teardown_once_then_the_stop(
     asyncio.run(decision_engine.run_once(oc))
     deferred = _events(engine_db)[seeded:]
     assert [e.action for e in deferred] == [audit.INSTANCE_TEARDOWN_DEFERRED]
-    assert deferred[0].detail == {"reason": "pending_ingest", "mediapackage_ids": ["mp-1", "mp-2"]}
+    assert deferred[0].detail == {"reason": "ingest_in_progress", "mediapackage_ids": ["mp-1", "mp-2"]}
 
     activity = None
     asyncio.run(decision_engine.run_once(oc))

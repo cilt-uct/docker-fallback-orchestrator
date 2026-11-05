@@ -9,8 +9,8 @@ from datetime import timedelta
 
 import pytest
 
-from app import decision_engine
-from app.models import AgentHealth, AuditEvent, Instance, InstanceStatus, utcnow
+from app import audit, decision_engine
+from app.models import AgentHealth, AuditActorType, AuditEvent, AuditOutcome, Instance, InstanceStatus, utcnow
 
 BackupReason = decision_engine.BackupReason
 
@@ -179,7 +179,7 @@ def test_backup_is_torn_down_once_the_ca_is_stable_and_4_days_have_passed(
 
 @pytest.mark.parametrize(
     "activity",
-    [BackupReason.recording_in_progress, BackupReason.pending_ingest, BackupReason.pyca_unreachable],
+    [BackupReason.recording_in_progress, BackupReason.ingest_in_progress, BackupReason.pyca_unreachable],
 )
 def test_backup_is_never_torn_down_while_its_pyca_holds_work(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health, activity
@@ -287,3 +287,89 @@ def test_backup_without_stored_credentials_is_treated_as_busy(make_instance):
     instance = make_instance(status=InstanceStatus.running)  # no ui_username/ui_password
 
     assert asyncio.run(decision_engine.pyca_activity(instance)) == BackupReason.pyca_unreachable
+
+
+# ---- what holds a backup up (only active work, and a hand-start) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ({"recording"}, BackupReason.recording_in_progress),
+        ({"finished recording"}, BackupReason.ingest_in_progress),  # ingest queued
+        ({"uploading", "paused after recording"}, BackupReason.ingest_in_progress),
+        # Waiting for an operator, or finished: safe on disk, nothing to interrupt.
+        ({"paused after recording"}, None),
+        ({"partial recording", "failed uploading", "failed recording"}, None),
+        ({"finished uploading", "upcoming"}, None),
+        (set(), None),
+    ],
+)
+def test_only_active_recording_or_ingest_holds_a_backup_up(statuses, expected):
+    assert decision_engine.activity_from_statuses(statuses) == expected
+
+
+def test_backup_holding_un_ingested_recordings_is_still_torn_down(
+    engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
+):
+    """Duplicates nobody ingests must not keep a backup up forever - the recordings stay on disk."""
+    make_instance(status=InstanceStatus.running)
+    seed_health(healthy_for=timedelta(days=5))
+    engine.calls["pyca"] = decision_engine.activity_from_statuses({"paused after recording"})
+
+    assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == ["room-1"]
+
+
+def test_backup_started_by_hand_stays_up_until_stopped_by_hand(
+    engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
+):
+    instance_id = make_instance(status=InstanceStatus.running).id
+    seed_health(healthy_for=timedelta(days=5))  # otherwise due for teardown
+    operator = audit.Actor(type=AuditActorType.operator, source_ip="10.0.0.1")
+    engine_db.add(
+        AuditEvent(
+            actor_type=AuditActorType.system,
+            actor="system",
+            action=audit.INSTANCE_START,
+            outcome=AuditOutcome.success,
+            instance_id=instance_id,
+        )
+    )
+    audit.record(
+        engine_db, actor=operator, action=audit.INSTANCE_START, instance=engine_db.get(Instance, instance_id)
+    )
+    engine_db.commit()
+
+    for _ in range(3):
+        assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == []
+    assert _status(engine_db) == InstanceStatus.running
+
+    # Once anyone stops it, the hold is over; a later automatic start isn't held.
+    for actor in (operator, audit.SYSTEM):
+        action = audit.INSTANCE_STOP if actor is operator else audit.INSTANCE_START
+        audit.record(engine_db, actor=actor, action=action, instance=engine_db.get(Instance, instance_id))
+    engine_db.commit()
+    assert not audit.started_by_operator(engine_db, instance_id)
+    assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == ["room-1"]
+
+
+def test_a_failed_manual_start_does_not_hold(db, make_instance):
+    instance = make_instance(status=InstanceStatus.error)
+    operator = audit.Actor(type=AuditActorType.operator)
+    audit.record(
+        db, actor=operator, action=audit.INSTANCE_START, outcome=AuditOutcome.failure, instance=instance
+    )
+    db.commit()
+
+    assert not audit.started_by_operator(db, instance.id)
+
+
+def test_instance_list_shows_a_manual_hold(client, db, make_instance):
+    instance = make_instance(status=InstanceStatus.running)
+    audit.record(
+        db, actor=audit.Actor(type=AuditActorType.operator), action=audit.INSTANCE_START, instance=instance
+    )
+    db.commit()
+
+    (listed,) = client.get("/instances").json()
+    assert listed["started_by_operator"] is True
