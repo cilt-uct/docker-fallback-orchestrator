@@ -186,7 +186,7 @@ async def pyca_activity(instance: Instance) -> BackupReason | None:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
-                f"http://localhost:{instance.ui_port}/api/events",
+                f"http://{settings.pyca_ui_host}:{instance.ui_port}/api/events",
                 auth=(instance.ui_username, instance.ui_password),
             )
             resp.raise_for_status()

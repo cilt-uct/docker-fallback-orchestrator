@@ -23,7 +23,7 @@ from app.database import Base, get_db  # noqa: E402
 from app.errors import register_exception_handlers  # noqa: E402
 from app.models import AgentHealth, Instance, InstanceStatus, utcnow  # noqa: E402 - also registers tables
 from app.opencast_client import AgentState, ScheduledEvent  # noqa: E402
-from app.routers import audit, instances, monitoring, web  # noqa: E402
+from app.routers import audit, instances, monitoring, recordings, web  # noqa: E402
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def app(db):
     """The API's routers and error handlers, on the test database, without the lifespan's engine loop."""
     app = FastAPI()
     register_exception_handlers(app)
-    for module in (instances, audit, monitoring, web):
+    for module in (instances, audit, monitoring, recordings, web):
         app.include_router(module.router)
     app.dependency_overrides[get_db] = lambda: db
     return app

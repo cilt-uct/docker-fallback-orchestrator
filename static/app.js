@@ -3,7 +3,8 @@
 /*
  * pyca-orchestrator dashboard
  *
- * Shared helpers (api, escapeHtml, formatRelativeTime) live in common.js.
+ * Shared helpers (api, escapeHtml, formatRelativeTime, formatBytes, showToast, confirmAction)
+ * live in common.js.
  *
  * Sections: config -> utilities -> state -> rendering
  * (keyed diff against `rowElements`, so a 5s poll patches existing rows
@@ -53,83 +54,12 @@ const CONTAINER_HEALTH_BADGE = {
   starting: "text-bg-warning",
 };
 
-const TOAST_ICON = {
-  success: "bi-check-circle-fill",
-  danger: "bi-exclamation-octagon-fill",
-};
-
 const REFRESH_MS = 5000;
 const MAX_CONSECUTIVE_FAILURES_BEFORE_BANNER = 1;
 
 // ---------------------------------------------------------------------
 // 2. Utilities
 // ---------------------------------------------------------------------
-
-function formatBytes(bytes) {
-  if (bytes === null || bytes === undefined) return "–";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i++;
-  }
-  return `${value.toFixed(1)} ${units[i]}`;
-}
-
-function showToast(message, variant = "success") {
-  const container = document.getElementById("toast-container");
-  const toastEl = document.createElement("div");
-  toastEl.className = `toast fade align-items-center text-bg-${variant} border-0`;
-  toastEl.setAttribute("role", "status");
-  toastEl.setAttribute("aria-live", "polite");
-  const iconClass = TOAST_ICON[variant] || "bi-info-circle-fill";
-  toastEl.innerHTML = `
-    <div class="d-flex">
-      <div class="toast-body"><i class="bi ${iconClass} me-2" aria-hidden="true"></i>${escapeHtml(message)}</div>
-      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
-    </div>`;
-  container.appendChild(toastEl);
-  const toast = new bootstrap.Toast(toastEl, { delay: 4500 });
-  toast.show();
-  toastEl.addEventListener("hidden.bs.toast", () => toastEl.remove());
-}
-
-/**
- * Generic accessible replacement for window.confirm(), backed by the
- * #confirm-modal in index.html. Returns a Promise<boolean>.
- */
-function confirmAction({ title = "Confirm", body, confirmLabel = "Confirm", danger = true } = {}) {
-  return new Promise((resolve) => {
-    const modalEl = document.getElementById("confirm-modal");
-    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-    modalEl.querySelector("#confirm-modal-title-text").textContent = title;
-    modalEl.querySelector("#confirm-modal-icon").className = `bi ${danger ? "bi-exclamation-triangle text-danger" : "bi-question-circle text-primary"} me-2`;
-    modalEl.querySelector("#confirm-modal-body").innerHTML = body;
-    const acceptBtn = modalEl.querySelector("#confirm-modal-accept");
-    acceptBtn.innerHTML = `<i class="bi ${danger ? "bi-trash3" : "bi-check-lg"} me-1" aria-hidden="true"></i>${escapeHtml(confirmLabel)}`;
-    acceptBtn.className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
-
-    let settled = false;
-    const cleanup = () => {
-      acceptBtn.removeEventListener("click", onAccept);
-      modalEl.removeEventListener("hidden.bs.modal", onHidden);
-    };
-    const onAccept = () => {
-      settled = true;
-      cleanup();
-      modal.hide();
-      resolve(true);
-    };
-    const onHidden = () => {
-      cleanup();
-      if (!settled) resolve(false);
-    };
-    acceptBtn.addEventListener("click", onAccept);
-    modalEl.addEventListener("hidden.bs.modal", onHidden);
-    modal.show();
-  });
-}
 
 // ---------------------------------------------------------------------
 // 3. State
@@ -275,6 +205,7 @@ function populateRow(tr, inst, bytes) {
 
   const menu = tr.querySelector('[data-field="actions-menu"]');
   menu.querySelector('[data-field="history-link"]').href = `/activity?venue=${encodeURIComponent(inst.venue)}`;
+  menu.querySelector('[data-field="recordings-link"]').href = `/library?venue=${encodeURIComponent(inst.venue)}`;
   menu.querySelector('[data-action="start"]').disabled = !canStart;
   menu.querySelector('[data-action="stop"]').disabled = !canStop;
   menu.querySelector('[data-action="restart"]').disabled = !canRestart;

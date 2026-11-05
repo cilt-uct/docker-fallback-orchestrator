@@ -1,10 +1,43 @@
-# Dev dependency stack. The controller itself is NOT containerized here:
-# it shells out to `docker compose` for each managed PyCA instance using
-# host-relative paths (./instances/<venue>/...), which breaks under
-# Docker-outside-of-Docker unless those paths are re-mapped to their real
-# host location. Run the controller directly on the host for now:
-#   uvicorn app.main:app --host 0.0.0.0 --port 8080
+# The controller, and a MySQL for local development.
+#
+#   docker compose up -d --build
+#
+# The controller drives each venue's PyCA stack through the host's Docker daemon
+# (Docker-outside-of-Docker), so two things must hold:
+#   - the instances folder is mounted at the SAME absolute path inside the container
+#     as on the host, because the compose files it generates are handed to the host's
+#     daemon, which resolves their bind mounts against host paths;
+#   - the backups' PyCA UIs (published on the host) are reached via the host's address.
+# Values the container must see differently from a host-run controller (e.g.
+# "localhost") are set with the CONTROLLER_* variables below, in .env or the shell.
 services:
+  controller:
+    build: .
+    image: pyca-orchestrator:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Same absolute path inside and outside the container - see the top of this file.
+      INSTANCES_DIR: ${INSTANCES_HOST_DIR:-${PWD}/instances}
+      # Same rule for recordings: the PyCA stacks mount RECORDINGS_DIR/<venue> by host path.
+      RECORDINGS_DIR: ${RECORDINGS_HOST_DIR:-/data/pyca-recordings}
+      PYCA_UI_HOST: host.docker.internal
+      # "localhost" in .env means the container itself here; override where needed,
+      # e.g. CONTROLLER_MYSQL_HOST=mysql for the MySQL below, or
+      # CONTROLLER_OPENCAST_HOST=host.docker.internal:8080 for an Opencast on the host.
+      MYSQL_HOST: ${CONTROLLER_MYSQL_HOST:-${MYSQL_HOST:-mysql}}
+      OPENCAST_HOST: ${CONTROLLER_OPENCAST_HOST:-${OPENCAST_HOST:-localhost}}
+      ALLOW_PLACEHOLDER_SECRETS: ${ALLOW_PLACEHOLDER_SECRETS:-false}
+    ports:
+      - "${CONTROLLER_PORT:-8090}:8090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${INSTANCES_HOST_DIR:-${PWD}/instances}:${INSTANCES_HOST_DIR:-${PWD}/instances}
+      - ${RECORDINGS_HOST_DIR:-/data/pyca-recordings}:${RECORDINGS_HOST_DIR:-/data/pyca-recordings}
+    extra_hosts:
+      # host.docker.internal also on Linux (Docker Desktop provides it already).
+      - "host.docker.internal:host-gateway"
+
   mysql:
     image: mysql:8.0
     restart: unless-stopped

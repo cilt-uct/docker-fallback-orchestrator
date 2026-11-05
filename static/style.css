@@ -357,7 +357,8 @@ tr.row-new {
 
 /* Neutral chip instead of Bootstrap's default pink <code> — reads as a copyable ID, not inline prose. */
 #details-body code,
-.audit-detail code {
+.audit-detail code,
+#recordings-table code {
   color: var(--bs-body-color);
   background: var(--bs-tertiary-bg, #f1f3f5);
   padding: 0.1em 0.4em;
@@ -410,4 +411,10 @@ tr.row-new {
   .toolbar-row-filters > .bi-funnel {
     display: none;
   }
+}
+
+/* ---- Recordings page ---- */
+
+.retention-input {
+  width: 5.5rem;
 }

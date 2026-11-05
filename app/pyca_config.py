@@ -28,7 +28,7 @@ def render_pyca_conf(instance: Instance, ui_username: str, ui_password: str) -> 
 
 
 def write_pyca_conf(instance: Instance, ui_username: str, ui_password: str) -> Path:
-    config_dir = Path(instance.config_dir)
+    config_dir = settings.instance_dir(instance.venue)
     config_dir.mkdir(parents=True, exist_ok=True)
     conf_path = config_dir / "pyca.conf"
     conf_path.write_text(render_pyca_conf(instance, ui_username, ui_password))

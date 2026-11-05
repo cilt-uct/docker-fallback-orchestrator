@@ -26,6 +26,8 @@ INSTANCE_RESTART = "instance.restart"
 INSTANCE_DELETE = "instance.delete"
 INSTANCE_RTSP_SOURCE_CHANGED = "instance.rtsp_source_changed"
 INSTANCE_TEARDOWN_DEFERRED = "instance.teardown_deferred"
+RECORDING_DELETED = "recording.deleted"
+RECORDING_RETENTION_CHANGED = "recording.retention_changed"
 
 
 @dataclass(frozen=True)

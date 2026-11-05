@@ -1,0 +1,14 @@
+# Only app/, templates/, static/ and requirements.txt go into the image.
+.git
+.github
+.venv
+.env
+.env.*
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+instances
+dev
+tests
+To-do.md

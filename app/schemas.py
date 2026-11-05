@@ -36,6 +36,23 @@ class InstanceRuntimeStatus(BaseModel):
     recordings_bytes: int | None = None
 
 
+class RecordingRead(BaseModel):
+    venue: str
+    name: str
+    mediapackage_id: str | None
+    started_at: datetime
+    size_bytes: int
+    pyca_status: str
+    in_progress: bool
+    retention_days: int
+    retention_overridden: bool
+    delete_after: datetime
+
+
+class RetentionUpdate(BaseModel):
+    retention_days: int = Field(ge=1, le=3650)
+
+
 class AuditEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

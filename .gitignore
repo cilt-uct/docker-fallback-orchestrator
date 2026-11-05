@@ -220,4 +220,5 @@ __marimo__/
 # Project-specific
 instances/*/
 !instances/.gitkeep
+recordings/
 dev/

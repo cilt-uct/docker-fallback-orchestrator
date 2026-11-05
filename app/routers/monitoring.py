@@ -83,8 +83,8 @@ def summary(db: Session = Depends(get_db)):
     for instance in instances:
         by_status[instance.status.value] += 1
 
-    # The filesystem that holds every instance's recordings.
-    disk_usage = _disk_usage(settings.instances_dir)
+    # The filesystem that holds every venue's recordings.
+    disk_usage = _disk_usage(settings.recordings_dir)
 
     return {
         "instance_count": len(instances),

@@ -1,45 +1,59 @@
-# /var/lib/pyca is bind-mounted (not a named volume) so the controller can
-# read recording sizes and the sqlite state file straight off the host at
-# ./data, without going through the Docker API.
+# Bind mounts, not named volumes, so the controller reads everything straight off
+# the host without going through the Docker API:
+#   ./data -> /var/lib/pyca             PyCA's state (its sqlite database)
+#   {{ recordings_dir }} -> /var/lib/pyca/recordings   this venue's recordings
+#     (RECORDINGS_DIR/<venue>, kept apart from the instance's Docker state)
+# Containers are named pyca-<venue>-<service> (e.g. pyca-lt1-capture) so they're easy
+# to find in `docker ps`; the controller itself finds them by the compose project label.
 services:
   pyca-schedule:
+    container_name: pyca-{{ venue }}-schedule
     command: schedule
     image: {{ pyca_image }}
     restart: unless-stopped
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
+      - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-ingest:
+    container_name: pyca-{{ venue }}-ingest
     command: ingest
     image: {{ pyca_image }}
     restart: unless-stopped
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
+      - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-capture:
+    container_name: pyca-{{ venue }}-capture
     command: capture
     image: {{ pyca_image }}
     restart: unless-stopped
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
+      - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-agentstate:
+    container_name: pyca-{{ venue }}-agentstate
     command: agentstate
     image: {{ pyca_image }}
     restart: unless-stopped
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
+      - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-ui:
+    container_name: pyca-{{ venue }}-ui
     entrypoint: ["gunicorn", "--config=/etc/pyca/gunicorn.conf.py", "pyca.ui:app"]
     image: {{ pyca_image }}
     restart: unless-stopped
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
+      - "{{ recordings_dir }}:/var/lib/pyca/recordings"
     ports:
       - "{{ ui_port }}:8000"

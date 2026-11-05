@@ -45,9 +45,14 @@ def _docker_client() -> docker.DockerClient:
 
 def render_compose_file(instance: Instance) -> Path:
     template = _jinja_env.get_template("docker-compose.yaml.j2")
-    content = template.render(pyca_image=settings.pyca_image, ui_port=instance.ui_port)
+    content = template.render(
+        pyca_image=settings.pyca_image,
+        ui_port=instance.ui_port,
+        recordings_dir=settings.venue_recordings_dir(instance.venue),
+        venue=instance.venue,
+    )
 
-    config_dir = Path(instance.config_dir)
+    config_dir = settings.instance_dir(instance.venue)
     config_dir.mkdir(parents=True, exist_ok=True)
     compose_path = config_dir / "docker-compose.yaml"
     compose_path.write_text(content)
@@ -55,7 +60,7 @@ def render_compose_file(instance: Instance) -> Path:
 
 
 def _run_compose(instance: Instance, *args: str) -> None:
-    compose_path = Path(instance.config_dir) / "docker-compose.yaml"
+    compose_path = settings.instance_dir(instance.venue) / "docker-compose.yaml"
     command = " ".join(args)
     try:
         result = subprocess.run(

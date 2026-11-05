@@ -22,6 +22,8 @@ const ACTION_LABEL = {
   "instance.delete": "Deleted",
   "instance.rtsp_source_changed": "RTSP source changed",
   "instance.teardown_deferred": "Teardown deferred",
+  "recording.deleted": "Recording deleted",
+  "recording.retention_changed": "Recording retention changed",
 };
 
 // One entry per BackupReason in app/decision_engine.py, plus retired values that
@@ -43,6 +45,11 @@ const DETAIL_LABEL = {
   rtsp_source: "RTSP source",
   ui_port: "UI port",
   agent_healthy_since: "Agent healthy since (UTC)",
+  recording: "Recording",
+  pyca_status: "PyCA status",
+  started_at: "Started (UTC)",
+  retention_days: "Retention (days)",
+  size_bytes: "Size (bytes)",
   last_needed_lecture_end: "Last lecture that needed it ended (UTC)",
   from: "From",
   to: "To",

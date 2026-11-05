@@ -1,4 +1,4 @@
-{#- Shared primary navigation. Include with `active` set to "instances" or "audit". Navigation only: page-specific actions (e.g. Add instance) live in the page, so the bar is identical everywhere. -#}
+{#- Shared primary navigation. Include with `active` set to "instances", "audit" or "recordings". Navigation only: page-specific actions (e.g. Add instance) live in the page, so the bar is identical everywhere. -#}
 <nav class="navbar navbar-dark bg-dark mb-4 app-navbar" aria-label="Primary">
   <div class="container-fluid app-navbar-inner">
     <a class="navbar-brand d-flex align-items-center gap-2 me-0" href="/">
@@ -15,6 +15,11 @@
       <li class="nav-item">
         <a class="nav-link{% if active == 'audit' %} active{% endif %}" href="/activity"{% if active == 'audit' %} aria-current="page"{% endif %}>
           <i class="bi bi-journal-text" aria-hidden="true"></i> Audit log
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link{% if active == 'recordings' %} active{% endif %}" href="/library"{% if active == 'recordings' %} aria-current="page"{% endif %}>
+          <i class="bi bi-camera-video" aria-hidden="true"></i> Recordings
         </a>
       </li>
     </ul>

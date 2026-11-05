@@ -34,6 +34,8 @@ class Instance(Base):
 
     ui_port: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     compose_project: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    # Informational: where the folder was when created. Code uses settings.instance_dir(venue),
+    # so moving INSTANCES_DIR (or running in a container) doesn't strand existing rows.
     config_dir: Mapped[str] = mapped_column(String(512), nullable=False)
 
     status: Mapped[InstanceStatus] = mapped_column(
@@ -68,6 +70,22 @@ class AgentHealth(Base):
     healthy_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # End of the latest scheduled event that needed a backup.
     last_needed_event_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class RecordingRetention(Base):
+    """A per-recording override of RECORDING_RETENTION_DAYS, set from the Recordings page.
+
+    Recordings themselves aren't stored in the database - they're found on disk
+    (see app.recordings). Only recordings whose retention was changed have a row.
+    """
+
+    __tablename__ = "recording_retention"
+
+    venue: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # The recording's folder name, e.g. recording-1793914012-60b823d0-...
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class AuditActorType(str, enum.Enum):

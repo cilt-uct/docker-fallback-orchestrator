@@ -20,9 +20,12 @@ preview_dir      = './recordings'
 
 # Pull the venue's RTSP source directly. {{time}}/{{dir}}/{{name}} are pyCA's
 # own substitution placeholders, not ours - left as literal text here.
-command          = 'ffmpeg -nostats -y -rtsp_transport tcp -i $rtsp_source -t {{time}} -c:v copy -c:a aac {{dir}}/{{name}}.mkv'
+# Fragmented MP4 (+frag_keyframe+empty_moov): a recording cut off by a crash or a
+# dropped stream stays playable up to the cut, unlike a plain MP4. Video is copied
+# as-is; audio is converted to AAC.
+command          = 'ffmpeg -nostats -y -rtsp_transport tcp -i $rtsp_source -t {{time}} -c:v copy -c:a aac -movflags +frag_keyframe+empty_moov {{dir}}/{{name}}.mp4'
 flavors          = 'presenter/source'
-files            = '{{dir}}/{{name}}.mkv'
+files            = '{{dir}}/{{name}}.mp4'
 
 
 [server]

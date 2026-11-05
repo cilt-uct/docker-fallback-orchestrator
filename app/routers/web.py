@@ -28,3 +28,9 @@ def dashboard(request: Request):
 @router.get("/activity", response_class=HTMLResponse)
 def audit_log(request: Request):
     return templates.TemplateResponse(request, "audit.html", {})
+
+
+# Not /recordings - that's the JSON API.
+@router.get("/library", response_class=HTMLResponse)
+def recordings_page(request: Request):
+    return templates.TemplateResponse(request, "recordings.html", {})

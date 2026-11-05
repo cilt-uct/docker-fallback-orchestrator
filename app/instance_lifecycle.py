@@ -4,6 +4,8 @@ Shared by the HTTP API and the decision engine, so an instance is built and
 started the same way whichever of them asks for it.
 """
 
+import logging
+import os
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -12,6 +14,8 @@ from app import compose_manager, pyca_config
 from app.config import settings
 from app.models import Instance, InstanceStatus
 from app.port_allocator import allocate_port
+
+logger = logging.getLogger(__name__)
 
 
 class InstanceNotStartableError(ValueError):
@@ -31,7 +35,8 @@ def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | No
         rtsp_source=rtsp_source,
         ui_port=allocate_port(db),
         compose_project=f"pyca-{venue}",
-        config_dir=str(settings.instances_dir / venue),
+        # Informational only - the folder is always derived via settings.instance_dir().
+        config_dir=str(settings.instance_dir(venue)),
         status=InstanceStatus.stopped,
     )
 
@@ -52,13 +57,32 @@ def provision_and_start(instance: Instance) -> None:
             "a backup that could never capture anything"
         )
     ensure_ui_credentials(instance)
+    prepare_recordings_dir(instance)
     pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
     compose_manager.render_compose_file(instance)
     compose_manager.up(instance)
 
 
 def recordings_dir(instance: Instance) -> Path:
-    return Path(instance.config_dir) / "data" / "recordings"
+    return settings.venue_recordings_dir(instance.venue)
+
+
+def prepare_recordings_dir(instance: Instance) -> Path:
+    """Create the venue's recordings folder before PyCA starts, writable by PyCA.
+
+    Left to Docker, a missing bind-mount source is created owned by root, which PyCA
+    (running as PYCA_UID) can't write to. When the controller runs as root - as it does
+    in its container - the folder is handed to that user; otherwise it's created as the
+    controller's own user, which must then be able to grant PyCA access itself.
+    """
+    path = recordings_dir(instance)
+    path.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        try:
+            os.chown(path, settings.pyca_uid, settings.pyca_uid)
+        except OSError as exc:
+            logger.warning("Could not hand %s to PyCA's user %s: %s", path, settings.pyca_uid, exc)
+    return path
 
 
 def dir_size_bytes(path: Path) -> int:
