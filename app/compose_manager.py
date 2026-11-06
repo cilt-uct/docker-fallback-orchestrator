@@ -49,7 +49,7 @@ def render_compose_file(instance: Instance) -> Path:
         pyca_image=settings.pyca_image,
         ui_port=instance.ui_port,
         recordings_dir=settings.venue_recordings_dir(instance.venue),
-        venue=instance.venue,
+        compose_project=instance.compose_project,
     )
 
     config_dir = settings.instance_dir(instance.venue)
@@ -87,11 +87,22 @@ def up(instance: Instance) -> None:
 
 
 def down(instance: Instance) -> None:
+    """Stop and remove the instance's containers. A no-op if it was never provisioned
+    (no compose file), so it's always safe to call - e.g. before deleting an instance."""
+    if not (settings.instance_dir(instance.venue) / "docker-compose.yaml").is_file():
+        return
     _run_compose(instance, "down")
 
 
-def restart(instance: Instance) -> None:
-    _run_compose(instance, "restart")
+def recreate(instance: Instance) -> None:
+    """Restart the containers on the current compose file and pyca.conf - unlike
+    `docker compose restart`, which would keep the old config."""
+    _run_compose(instance, "up", "-d", "--force-recreate")
+
+
+def has_running_containers(instance: Instance) -> bool:
+    """True if any of the instance's containers is running. Raises DockerUnavailableError."""
+    return any(c["status"] == "running" for c in container_statuses(instance))
 
 
 def container_statuses(instance: Instance) -> list[dict]:

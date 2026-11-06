@@ -152,7 +152,7 @@ def test_compose_timeout_and_missing_binary_become_compose_errors(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _raise(FileNotFoundError("docker")))
     with pytest.raises(compose_manager.ComposeError, match="Could not run docker compose"):
-        compose_manager.down(instance)
+        compose_manager.recreate(instance)
 
 
 def test_compose_calls_are_bounded_by_the_configured_timeout(monkeypatch):

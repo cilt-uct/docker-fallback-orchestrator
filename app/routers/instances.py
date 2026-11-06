@@ -1,4 +1,5 @@
 import logging
+from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -19,9 +20,13 @@ from app.constants import (
 from app.database import get_db
 from app.errors import new_error_id
 from app.instance_lifecycle import (
+    InstanceBusyError,
     InstanceNotStartableError,
     build_instance,
     dir_size_bytes,
+    ensure_ui_credentials,
+    instance_lock,
+    provision_and_restart,
     provision_and_start,
     recordings_dir,
 )
@@ -78,6 +83,16 @@ def list_instances(db: Session = Depends(get_db)):
     for instance in instances:
         _mark_operator_hold(db, instance)
     return instances
+
+
+@contextmanager
+def _locked(instance: Instance):
+    """Hold the instance's lock (shared with the decision engine), or answer 409 if it's taken."""
+    try:
+        with instance_lock(instance.id):
+            yield
+    except InstanceBusyError as exc:
+        raise HTTPException(HTTP_409_CONFLICT, str(exc)) from exc
 
 
 def _mark_operator_hold(db: Session, instance: Instance) -> Instance:
@@ -157,7 +172,7 @@ def _get_instance_or_404(db: Session, instance_id: int) -> Instance:
 
 @router.get("/{instance_id}", response_model=InstanceRuntimeStatus)
 def get_instance(instance_id: int, db: Session = Depends(get_db)):
-    instance = _get_instance_or_404(db, instance_id)
+    instance = _mark_operator_hold(db, _get_instance_or_404(db, instance_id))
     try:
         containers = compose_manager.container_statuses(instance)
     except compose_manager.DockerUnavailableError as exc:
@@ -179,16 +194,22 @@ def start_instance(
     actor: Actor = Depends(operator_actor),
 ):
     instance = _get_instance_or_404(db, instance_id)
-    try:
-        provision_and_start(instance)
-        instance.status = InstanceStatus.running
-        instance.last_error = None
-    except Exception as exc:  # noqa: BLE001 - classified in _action_failed
-        raise _action_failed(db, actor, audit.INSTANCE_START, "start", instance, exc) from exc
-    audit.record(db, actor=actor, action=audit.INSTANCE_START, instance=instance)
-    db.commit()
+    with _locked(instance):
+        # Saved before Docker is touched, so a crash mid-start can't leave a running PyCA
+        # whose login the database doesn't know (see ensure_ui_credentials).
+        instance.status = InstanceStatus.starting
+        ensure_ui_credentials(instance)
+        db.commit()
+        try:
+            provision_and_start(instance)
+            instance.status = InstanceStatus.running
+            instance.last_error = None
+        except Exception as exc:  # noqa: BLE001 - classified in _action_failed
+            raise _action_failed(db, actor, audit.INSTANCE_START, "start", instance, exc) from exc
+        audit.record(db, actor=actor, action=audit.INSTANCE_START, instance=instance)
+        db.commit()
     db.refresh(instance)
-    return instance
+    return _mark_operator_hold(db, instance)
 
 
 @router.post("/{instance_id}/stop", response_model=InstanceRead)
@@ -198,24 +219,25 @@ def stop_instance(
     actor: Actor = Depends(operator_actor),
 ):
     instance = _get_instance_or_404(db, instance_id)
-    # Read before the stop is recorded, which resets the "since last stop" window.
-    mediapackage_ids = audit.mediapackages_since_last_stop(db, instance.id)
-    try:
-        compose_manager.down(instance)
-        instance.status = InstanceStatus.stopped
-        instance.last_error = None
-    except Exception as exc:  # noqa: BLE001 - classified in _action_failed
-        raise _action_failed(db, actor, audit.INSTANCE_STOP, "stop", instance, exc) from exc
-    audit.record(
-        db,
-        actor=actor,
-        action=audit.INSTANCE_STOP,
-        instance=instance,
-        detail={"mediapackage_ids": mediapackage_ids},
-    )
-    db.commit()
+    with _locked(instance):
+        # Read before the stop is recorded, which resets the "since last stop" window.
+        mediapackage_ids = audit.mediapackages_since_last_stop(db, instance.id)
+        try:
+            compose_manager.down(instance)
+            instance.status = InstanceStatus.stopped
+            instance.last_error = None
+        except Exception as exc:  # noqa: BLE001 - classified in _action_failed
+            raise _action_failed(db, actor, audit.INSTANCE_STOP, "stop", instance, exc) from exc
+        audit.record(
+            db,
+            actor=actor,
+            action=audit.INSTANCE_STOP,
+            instance=instance,
+            detail={"mediapackage_ids": mediapackage_ids},
+        )
+        db.commit()
     db.refresh(instance)
-    return instance
+    return _mark_operator_hold(db, instance)
 
 
 @router.post("/{instance_id}/restart", response_model=InstanceRead)
@@ -225,15 +247,16 @@ def restart_instance(
     actor: Actor = Depends(operator_actor),
 ):
     instance = _get_instance_or_404(db, instance_id)
-    try:
-        compose_manager.restart(instance)
-        instance.last_error = None
-    except Exception as exc:  # noqa: BLE001 - classified in _action_failed
-        raise _action_failed(db, actor, audit.INSTANCE_RESTART, "restart", instance, exc) from exc
-    audit.record(db, actor=actor, action=audit.INSTANCE_RESTART, instance=instance)
-    db.commit()
+    with _locked(instance):
+        try:
+            provision_and_restart(instance)
+            instance.last_error = None
+        except Exception as exc:  # noqa: BLE001 - classified in _action_failed
+            raise _action_failed(db, actor, audit.INSTANCE_RESTART, "restart", instance, exc) from exc
+        audit.record(db, actor=actor, action=audit.INSTANCE_RESTART, instance=instance)
+        db.commit()
     db.refresh(instance)
-    return instance
+    return _mark_operator_hold(db, instance)
 
 
 @router.delete("/{instance_id}", status_code=HTTP_204_NO_CONTENT)
@@ -254,6 +277,13 @@ def delete_instance(
         )
         db.commit()
         raise HTTPException(HTTP_409_CONFLICT, "Stop the instance before deleting it")
-    audit.record(db, actor=actor, action=audit.INSTANCE_DELETE, instance=instance)
-    db.delete(instance)
-    db.commit()
+    with _locked(instance):
+        # Not "running" doesn't mean no containers: a failed stop leaves an instance in
+        # "error" with everything up. Remove them first, or they'd run on untracked.
+        try:
+            compose_manager.down(instance)
+        except Exception as exc:  # noqa: BLE001 - classified in _action_failed
+            raise _action_failed(db, actor, audit.INSTANCE_DELETE, "delete", instance, exc) from exc
+        audit.record(db, actor=actor, action=audit.INSTANCE_DELETE, instance=instance)
+        db.delete(instance)
+        db.commit()

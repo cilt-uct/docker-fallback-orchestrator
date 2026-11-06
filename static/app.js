@@ -206,7 +206,8 @@ function populateRow(tr, inst, bytes) {
 
   const menu = tr.querySelector('[data-field="actions-menu"]');
   menu.querySelector('[data-field="history-link"]').href = `/activity?venue=${encodeURIComponent(inst.venue)}`;
-  menu.querySelector('[data-field="recordings-link"]').href = `/library?venue=${encodeURIComponent(inst.venue)}`;
+  // Recordings are grouped by folder, which is the venue's safe name.
+  menu.querySelector('[data-field="recordings-link"]').href = `/library?venue=${encodeURIComponent(inst.safe_name)}`;
   menu.querySelector('[data-action="start"]').disabled = !canStart;
   menu.querySelector('[data-action="stop"]').disabled = !canStop;
   menu.querySelector('[data-action="restart"]').disabled = !canRestart;

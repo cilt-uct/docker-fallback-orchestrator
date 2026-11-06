@@ -56,9 +56,12 @@ def client(app):
 
 @pytest.fixture
 def engine_db(db, monkeypatch):
-    """Point the decision engine at the test database, with no deferred teardowns left from other tests."""
+    """Point the decision engine at the test database, with fresh per-process state (deferred
+    teardowns, start backoff), and Docker reporting a backup's containers as up."""
     monkeypatch.setattr(decision_engine, "SessionLocal", lambda: db)
     monkeypatch.setattr(decision_engine, "_teardown_deferred_ids", set())
+    monkeypatch.setattr(decision_engine, "_start_failures", {})
+    monkeypatch.setattr(decision_engine.compose_manager, "has_running_containers", lambda instance: True)
     return db
 
 

@@ -6,12 +6,15 @@ started the same way whichever of them asks for it.
 
 import logging
 import os
+import threading
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app import compose_manager, pyca_config
-from app.config import settings
+from app.config import safe_name, settings
 from app.models import Instance, InstanceStatus
 from app.port_allocator import allocate_port
 
@@ -20,6 +23,29 @@ logger = logging.getLogger(__name__)
 
 class InstanceNotStartableError(ValueError):
     """The instance is missing something it needs before a start can even be attempted."""
+
+
+class InstanceBusyError(RuntimeError):
+    """Another start/stop/restart/delete of this instance is already in progress."""
+
+
+# One lock per instance, shared by the API's worker threads and the decision engine (the
+# controller is a single process), so the two never act on the same backup at once.
+_instance_locks: defaultdict[int, threading.Lock] = defaultdict(threading.Lock)
+_instance_locks_guard = threading.Lock()
+
+
+@contextmanager
+def instance_lock(instance_id: int):
+    """Hold the instance's lock for the block, or raise InstanceBusyError at once if it's taken."""
+    with _instance_locks_guard:
+        lock = _instance_locks[instance_id]
+    if not lock.acquire(blocking=False):
+        raise InstanceBusyError("This backup is already being started or stopped - try again shortly")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | None) -> Instance:
@@ -34,7 +60,9 @@ def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | No
         agent_id=agent_id,
         rtsp_source=rtsp_source,
         ui_port=allocate_port(db),
-        compose_project=f"pyca-{venue}",
+        # Venues the engine creates are named after Opencast agent IDs, which can contain
+        # anything; safe_name keeps the Docker names and folders valid.
+        compose_project=f"pyca-{safe_name(venue)}",
         # Informational only - the folder is always derived via settings.instance_dir().
         config_dir=str(settings.instance_dir(venue)),
         status=InstanceStatus.stopped,
@@ -50,7 +78,8 @@ def ensure_ui_credentials(instance: Instance) -> None:
         instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
 
 
-def provision_and_start(instance: Instance) -> None:
+def provision(instance: Instance) -> None:
+    """Write the instance's pyca.conf and compose file, and prepare its recordings folder."""
     if not instance.rtsp_source:
         raise InstanceNotStartableError(
             f"No RTSP source known for agent '{instance.agent_id}' - refusing to start "
@@ -60,7 +89,17 @@ def provision_and_start(instance: Instance) -> None:
     prepare_recordings_dir(instance)
     pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
     compose_manager.render_compose_file(instance)
+
+
+def provision_and_start(instance: Instance) -> None:
+    provision(instance)
     compose_manager.up(instance)
+
+
+def provision_and_restart(instance: Instance) -> None:
+    """Restart with freshly written config, so e.g. a changed camera URL takes effect."""
+    provision(instance)
+    compose_manager.recreate(instance)
 
 
 def recordings_dir(instance: Instance) -> Path:

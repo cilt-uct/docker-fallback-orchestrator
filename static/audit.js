@@ -22,6 +22,7 @@ const ACTION_LABEL = {
   "instance.delete": "Deleted",
   "instance.rtsp_source_changed": "RTSP source changed",
   "instance.teardown_deferred": "Teardown deferred",
+  "instance.containers_lost": "Containers found not running",
   "recording.deleted": "Recording deleted",
   "recording.retention_changed": "Recording retention changed",
 };

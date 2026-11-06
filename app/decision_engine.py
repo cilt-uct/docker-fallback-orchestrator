@@ -37,9 +37,11 @@ from app import audit, compose_manager
 from app.config import settings
 from app.database import SessionLocal
 from app.instance_lifecycle import (
+    InstanceBusyError,
     InstanceNotStartableError,
     build_instance,
     ensure_ui_credentials,
+    instance_lock,
     provision_and_start,
 )
 from app.models import AgentHealth, AuditOutcome, Instance, InstanceStatus, utcnow
@@ -74,6 +76,27 @@ PYCA_INGESTING_STATUSES = {"finished recording", "uploading"}
 # (crash, lost DB connection); `compose down` is idempotent, so they're treated like
 # running ones.
 ACTIVE_STATUSES = (InstanceStatus.running, InstanceStatus.starting, InstanceStatus.stopping)
+# "error" too: a failed stop leaves an instance in error with its containers still up, and
+# a failed start may have left some running - both are cleaned up by the same teardown.
+TEARDOWN_STATUSES = (*ACTIVE_STATUSES, InstanceStatus.error)
+
+# Failed starts are retried with exponential backoff rather than every poll, so a venue that
+# can't start (bad camera URL, Docker trouble) doesn't hammer Docker - or, with a hung
+# daemon, stall the engine for COMPOSE_TIMEOUT_SECONDS every minute.
+_START_BACKOFF_MAX = timedelta(minutes=15)
+_start_failures: dict[int, tuple[int, datetime]] = {}  # instance id -> (failures, retry not before)
+
+
+def _start_backoff_active(instance_id: int, now: datetime) -> bool:
+    failure = _start_failures.get(instance_id)
+    return failure is not None and now < failure[1]
+
+
+def _record_start_failure(instance_id: int, now: datetime) -> None:
+    failures = _start_failures.get(instance_id, (0, now))[0] + 1
+    delay = min(timedelta(seconds=settings.poll_interval_seconds) * 2 ** (failures - 1), _START_BACKOFF_MAX)
+    _start_failures[instance_id] = (failures, now + delay)
+
 
 # Instances whose teardown was deferred on the previous poll, so a recording
 # left awaiting ingest is audited once rather than on every poll.
@@ -207,7 +230,9 @@ def activity_from_statuses(statuses: set[str]) -> BackupReason | None:
     return None
 
 
-async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, health: AgentHealth) -> None:
+async def _ensure_backup(
+    db: Session, event: ScheduledEvent, state: AgentState, health: AgentHealth, now: datetime
+) -> None:
     """Start a backup instance for one scheduled lecture if it needs one."""
     reason = _backup_reason(event, state, health)
     if reason is None:
@@ -222,7 +247,21 @@ async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, 
     if instance.status == InstanceStatus.running:
         db.commit()
         return
+    db.commit()  # the instance row and the needed lecture, whatever happens next
 
+    if _start_backoff_active(instance.id, now):
+        logger.debug("Not retrying backup for %s yet (backing off after failed starts)", event.agent_id)
+        return
+    try:
+        with instance_lock(instance.id):
+            await _start(db, instance, event, reason, now)
+    except InstanceBusyError:
+        logger.info("Backup for %s is being changed from the dashboard - skipping this pass", event.agent_id)
+
+
+async def _start(
+    db: Session, instance: Instance, event: ScheduledEvent, reason: BackupReason, now: datetime
+) -> None:
     logger.info(
         "Starting backup instance for %s (event %s, %s)", event.agent_id, event.mediapackage_id, reason
     )
@@ -234,8 +273,10 @@ async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, 
     ensure_ui_credentials(instance)
     db.commit()
     try:
-        provision_and_start(instance)
+        # Docker calls block - keep them off the event loop the API runs on.
+        await asyncio.to_thread(provision_and_start, instance)
     except Exception as exc:  # noqa: BLE001 - surfaced via last_error
+        _record_start_failure(instance.id, now)
         if isinstance(exc, (InstanceNotStartableError, compose_manager.ComposeError)):
             logger.error("Failed to start backup for %s: %s", event.agent_id, exc)
         else:
@@ -252,9 +293,41 @@ async def _ensure_backup(db: Session, event: ScheduledEvent, state: AgentState, 
                 detail={**detail, "error": str(exc)},
             )
     else:
+        _start_failures.pop(instance.id, None)
         instance.status = InstanceStatus.running
         instance.last_error = None
         audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance, detail=detail)
+    db.commit()
+
+
+async def _containers_running(instance: Instance) -> bool | None:
+    """Whether any of the instance's containers is up; None if Docker can't be asked."""
+    try:
+        return await asyncio.to_thread(compose_manager.has_running_containers, instance)
+    except compose_manager.DockerUnavailableError as exc:
+        logger.warning("%s", exc)
+        return None
+
+
+async def _reconcile(db: Session, instance: Instance) -> None:
+    """A backup marked running whose containers are gone (removed by hand, Docker trouble)
+    is marked error, so the dashboard tells the truth and the engine acts on it: the next
+    pass restarts it if it's still needed, or tears it down if not."""
+    if instance.status != InstanceStatus.running or await _containers_running(instance) is not False:
+        return
+    logger.warning(
+        "Backup instance for %s is marked running but none of its containers are", instance.agent_id
+    )
+    instance.status = InstanceStatus.error
+    instance.last_error = "The backup's containers aren't running"
+    audit.record(
+        db,
+        actor=audit.SYSTEM,
+        action=audit.INSTANCE_CONTAINERS_LOST,
+        outcome=AuditOutcome.failure,
+        instance=instance,
+        detail={"error": instance.last_error},
+    )
     db.commit()
 
 
@@ -271,7 +344,10 @@ async def _tear_down_if_done(
         logger.debug("Keeping backup instance for %s: started by hand", instance.agent_id)
         return
 
-    if activity := await pyca_activity(instance):
+    activity = await pyca_activity(instance)
+    if activity == BackupReason.pyca_unreachable and await _containers_running(instance) is False:
+        activity = None  # nothing is running, so there's nothing a teardown could interrupt
+    if activity:
         logger.warning("Not stopping backup instance for %s yet: %s", instance.agent_id, activity.value)
         deferred_ids.add(instance.id)
         if instance.id not in _teardown_deferred_ids:
@@ -300,7 +376,7 @@ async def _tear_down_if_done(
     instance.status = InstanceStatus.stopping
     db.commit()
     try:
-        compose_manager.down(instance)
+        await asyncio.to_thread(compose_manager.down, instance)
     except Exception as exc:  # noqa: BLE001 - surfaced via last_error
         if isinstance(exc, compose_manager.ComposeError):
             logger.error("Failed to stop backup for %s: %s", instance.agent_id, exc)
@@ -346,8 +422,8 @@ async def run_once(oc: OpencastClient) -> None:
         events = await oc.get_scheduled_events()
         now = utcnow()
 
-        active_ids = [
-            instance.id for instance in db.query(Instance).filter(Instance.status.in_(ACTIVE_STATUSES))
+        candidate_ids = [
+            instance.id for instance in db.query(Instance).filter(Instance.status.in_(TEARDOWN_STATUSES))
         ]
         observed = await _observe_agents(db, oc, now)
 
@@ -356,22 +432,28 @@ async def run_once(oc: OpencastClient) -> None:
                 continue
             state, health = observed[event.agent_id]
             try:
-                await _ensure_backup(db, event, state, health)
+                await _ensure_backup(db, event, state, health, now)
             except Exception:  # noqa: BLE001 - one venue must not block the others
                 db.rollback()
                 logger.exception("Failed to handle event %s for %s", event.mediapackage_id, event.agent_id)
 
         deferred_ids: set[int] = set()
-        for instance_id in active_ids:
+        for instance_id in candidate_ids:
             try:
                 instance = db.get(Instance, instance_id)
-                # Its status may have changed in the start phase above (e.g. a failed restart).
-                if instance is None or instance.status not in ACTIVE_STATUSES:
+                # Its status may have changed in the start phase above.
+                if instance is None or instance.status not in TEARDOWN_STATUSES:
                     continue
                 if instance.agent_id not in observed:
                     continue  # no current state for its agent - make no decision
                 _, health = observed[instance.agent_id]
-                await _tear_down_if_done(db, instance, health, now, deferred_ids)
+                with instance_lock(instance.id):
+                    await _reconcile(db, instance)
+                    await _tear_down_if_done(db, instance, health, now, deferred_ids)
+            except InstanceBusyError:
+                logger.info(
+                    "Instance %s is being changed from the dashboard - skipping this pass", instance_id
+                )
             except Exception:  # noqa: BLE001 - one venue must not block the others
                 db.rollback()
                 logger.exception("Failed to tear down instance %s", instance_id)

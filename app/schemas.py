@@ -28,6 +28,8 @@ class InstanceRead(BaseModel):
     updated_at: datetime
     # Started by hand, so the decision engine won't tear it down (see audit.started_by_operator).
     started_by_operator: bool = False
+    # The venue as used for Docker names and folders - e.g. its recordings folder.
+    safe_name: str
 
 
 class InstanceRuntimeStatus(BaseModel):

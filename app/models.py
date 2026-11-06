@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import JSON, DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.config import safe_name
 from app.database import Base
 
 
@@ -50,6 +51,11 @@ class Instance(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    @property
+    def safe_name(self) -> str:
+        """The venue as used for Docker names and folders (see config.safe_name)."""
+        return safe_name(self.venue)
 
 
 class AgentHealth(Base):

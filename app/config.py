@@ -1,6 +1,24 @@
+import hashlib
+import re
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def safe_name(name: str) -> str:
+    """A form of a venue/agent name that's safe as a Docker compose project, container name
+    and folder name. Names that already are (every dashboard-created venue) come back
+    unchanged; anything else - capitals, spaces, slashes, YAML-special characters - is
+    reduced to [a-z0-9_-] with a short hash of the original appended, so two different
+    names can never map to the same result.
+    """
+    if _SAFE_NAME.match(name):
+        return name
+    slug = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-_")[:40] or "venue"
+    return f"{slug}-{hashlib.sha256(name.encode()).hexdigest()[:8]}"
+
 
 # The value .env.example ships with for every secret.
 PLACEHOLDER_SECRET = "CHANGE_ME"
@@ -71,12 +89,12 @@ class Settings(BaseSettings):
         whether the controller runs on the host or in a container that mounts the folder
         at the same path - `docker compose` passes these paths to the host's Docker daemon.
         """
-        return self.instances_dir.resolve() / venue
+        return self.instances_dir.resolve() / safe_name(venue)
 
     def venue_recordings_dir(self, venue: str) -> Path:
         """Where a venue's recordings are written, as an absolute path - one folder per
         recording inside, named by PyCA (recording-<start epoch>-<mediapackage id>)."""
-        return self.recordings_dir.resolve() / venue
+        return self.recordings_dir.resolve() / safe_name(venue)
 
     def placeholder_secrets(self) -> list[str]:
         """Env var names of secrets still set to the placeholder, i.e. never configured."""

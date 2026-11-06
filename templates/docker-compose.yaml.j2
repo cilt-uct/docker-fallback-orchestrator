@@ -7,7 +7,7 @@
 # to find in `docker ps`; the controller itself finds them by the compose project label.
 services:
   pyca-schedule:
-    container_name: pyca-{{ venue }}-schedule
+    container_name: {{ compose_project }}-schedule
     command: schedule
     image: {{ pyca_image }}
     restart: unless-stopped
@@ -17,7 +17,7 @@ services:
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-ingest:
-    container_name: pyca-{{ venue }}-ingest
+    container_name: {{ compose_project }}-ingest
     command: ingest
     image: {{ pyca_image }}
     restart: unless-stopped
@@ -27,7 +27,7 @@ services:
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-capture:
-    container_name: pyca-{{ venue }}-capture
+    container_name: {{ compose_project }}-capture
     command: capture
     image: {{ pyca_image }}
     restart: unless-stopped
@@ -37,7 +37,7 @@ services:
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-agentstate:
-    container_name: pyca-{{ venue }}-agentstate
+    container_name: {{ compose_project }}-agentstate
     command: agentstate
     image: {{ pyca_image }}
     restart: unless-stopped
@@ -47,7 +47,7 @@ services:
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
 
   pyca-ui:
-    container_name: pyca-{{ venue }}-ui
+    container_name: {{ compose_project }}-ui
     entrypoint: ["gunicorn", "--config=/etc/pyca/gunicorn.conf.py", "pyca.ui:app"]
     image: {{ pyca_image }}
     restart: unless-stopped

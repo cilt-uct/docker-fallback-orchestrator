@@ -70,7 +70,7 @@ def test_start_failure_is_audited_with_error(client, db, make_instance):
 
 def test_stop_and_restart_are_audited(client, db, monkeypatch, make_instance):
     monkeypatch.setattr(instances_router.compose_manager, "down", lambda instance: None)
-    monkeypatch.setattr(instances_router.compose_manager, "restart", lambda instance: None)
+    monkeypatch.setattr(instances_router, "provision_and_restart", lambda instance: None)
     instance = make_instance(status=InstanceStatus.running)
 
     assert client.post(f"/instances/{instance.id}/restart").status_code == 200
@@ -162,6 +162,7 @@ def test_engine_audits_a_repeating_start_failure_once(
     }
 
     monkeypatch.setattr(decision_engine, "provision_and_start", lambda instance: None)
+    decision_engine._start_failures.clear()  # the backoff period has passed
     asyncio.run(decision_engine.run_once(oc))
     assert _events(engine_db)[-1].outcome == AuditOutcome.success
 
