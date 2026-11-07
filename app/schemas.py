@@ -57,6 +57,19 @@ class RetentionUpdate(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
 
 
+class AuditSummary(BaseModel):
+    """Counts over the last `days` - the Audit log page's summary tiles."""
+
+    days: int
+    since: datetime
+    failures: int
+    backups_started: int
+    backup_venues: int
+    manual_actions: int
+    recordings_deleted: int
+    bytes_freed: int
+
+
 class AuditEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

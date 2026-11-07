@@ -1,13 +1,50 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app import audit
 from app.database import get_db
-from app.models import AuditActorType, AuditEvent, AuditOutcome
-from app.schemas import AuditEventRead
+from app.models import AuditActorType, AuditEvent, AuditOutcome, utcnow
+from app.schemas import AuditEventRead, AuditSummary
 
 router = APIRouter(prefix="/audit", tags=["audit"])
+
+
+@router.get("/summary", response_model=AuditSummary)
+def audit_summary(
+    days: int = Query(7, ge=1, le=365),
+    venue: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Counts for the Audit log page's summary tiles, over the last `days` (optionally one venue)."""
+    since = utcnow() - timedelta(days=days)
+    window = db.query(AuditEvent).filter(AuditEvent.occurred_at >= since)
+    if venue is not None:
+        window = window.filter(AuditEvent.venue == venue)
+
+    def count(*conditions) -> int:
+        return window.filter(*conditions).count()
+
+    backup_starts = window.filter(
+        AuditEvent.action == audit.INSTANCE_START,
+        AuditEvent.actor_type == AuditActorType.system,
+        AuditEvent.outcome == AuditOutcome.success,
+    )
+    deleted = window.filter(AuditEvent.action == audit.RECORDING_DELETED).all()
+    return AuditSummary(
+        days=days,
+        since=since,
+        failures=count(AuditEvent.outcome == AuditOutcome.failure),
+        backups_started=backup_starts.count(),
+        backup_venues=backup_starts.with_entities(func.count(func.distinct(AuditEvent.venue))).scalar() or 0,
+        manual_actions=count(AuditEvent.actor_type == AuditActorType.operator),
+        recordings_deleted=len(deleted),
+        # Sizes are in each event's JSON detail; summed here rather than in SQL, which would need
+        # different JSON functions on MySQL and SQLite. Deletions are few per week.
+        bytes_freed=sum(int((event.detail or {}).get("size_bytes") or 0) for event in deleted),
+    )
 
 
 @router.get("", response_model=list[AuditEventRead])

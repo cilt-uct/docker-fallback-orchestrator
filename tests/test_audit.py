@@ -263,3 +263,43 @@ def test_audit_endpoint_pages_by_offset_and_reports_the_total(client, db, make_i
     filtered = client.get("/audit", params={"venue": "room-a", "limit": 1})
     assert (filtered.headers["X-Total-Count"], len(filtered.json())) == ("3", 1)
     assert client.get("/audit", params={"offset": -1}).status_code == 422
+
+
+def test_audit_summary_counts_the_last_week(client, db, make_instance):
+    from datetime import timedelta
+
+    from app.models import utcnow
+
+    a, b = make_instance(venue="room-a"), make_instance(venue="room-b")
+    operator = audit.Actor(type=AuditActorType.operator)
+    for instance in (a, b, a):
+        audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance)
+    audit.record(db, actor=operator, action=audit.INSTANCE_STOP, instance=a)
+    audit.record(
+        db, actor=audit.SYSTEM, action=audit.INSTANCE_START, outcome=AuditOutcome.failure, instance=b
+    )
+    audit.record(
+        db, actor=audit.SYSTEM, action=audit.RECORDING_DELETED, venue="room-a", detail={"size_bytes": 1000}
+    )
+    audit.record(
+        db, actor=operator, action=audit.RECORDING_DELETED, venue="room-b", detail={"size_bytes": 500}
+    )
+    old = audit.record(
+        db, actor=audit.SYSTEM, action=audit.INSTANCE_START, outcome=AuditOutcome.failure, instance=a
+    )
+    db.flush()
+    old.occurred_at = utcnow() - timedelta(days=8)  # outside the window
+    db.commit()
+
+    summary = client.get("/audit/summary").json()
+    assert {k: summary[k] for k in summary if k not in ("since", "days")} == {
+        "failures": 1,
+        "backups_started": 3,
+        "backup_venues": 2,
+        "manual_actions": 2,
+        "recordings_deleted": 2,
+        "bytes_freed": 1500,
+    }
+    room_a = client.get("/audit/summary", params={"venue": "room-a"}).json()
+    assert (room_a["backups_started"], room_a["failures"], room_a["bytes_freed"]) == (2, 0, 1000)
+    assert client.get("/audit/summary", params={"days": 30}).json()["failures"] == 2

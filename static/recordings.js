@@ -67,6 +67,46 @@ function populateVenueFilter() {
   select.value = wanted || "";
 }
 
+/** The summary cards: every recording on disk, regardless of the table's filters. */
+function renderSummary() {
+  const now = new Date();
+  const dayAhead = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const venues = new Set(recordings.map((r) => r.venue));
+  const notIngested = recordings.filter((r) => statusDisplay(r.pyca_status).label === NOT_INGESTED.label);
+  const totalBytes = recordings.reduce((sum, r) => sum + r.size_bytes, 0);
+  // The clean-up skips recordings still being written or uploaded.
+  const deletable = recordings.filter((r) => !r.in_progress).sort((a, b) => a.delete_after.localeCompare(b.delete_after));
+  const expiring = deletable.filter((r) => parseUtc(r.delete_after) <= dayAhead);
+  const set = (id, text) => {
+    document.getElementById(id).textContent = text;
+  };
+
+  set("stat-recordings", recordings.length);
+  set("stat-recordings-sub", `across ${venues.size} venue${venues.size === 1 ? "" : "s"}`);
+
+  set("stat-not-ingested", notIngested.length);
+  set("stat-not-ingested-sub", notIngested.length ? "may be the only copy" : "all accounted for");
+  // Highlight only when there's something to look at, like "Needs attention" on Instances.
+  document.getElementById("stat-not-ingested-card").classList.toggle("attention-warning", notIngested.length > 0);
+  // Swap the chip's Bootstrap colour utilities (they're !important, so CSS can't override them).
+  const chip = document.getElementById("stat-not-ingested-chip").classList;
+  chip.toggle("bg-secondary-subtle", !notIngested.length);
+  chip.toggle("text-secondary-emphasis", !notIngested.length);
+  chip.toggle("bg-warning-subtle", notIngested.length > 0);
+  chip.toggle("text-warning-emphasis", notIngested.length > 0);
+  document.getElementById("stat-not-ingested-icon").className =
+    `bi ${notIngested.length ? "bi-exclamation-triangle-fill" : "bi-cloud-check"}`;
+
+  set("stat-storage", formatBytes(totalBytes));
+  set("stat-storage-sub", "on the server");
+
+  set("stat-expiring", expiring.length);
+  set(
+    "stat-expiring-sub",
+    deletable.length ? `next ${formatRelativeTime(deletable[0].delete_after)}` : "nothing scheduled"
+  );
+}
+
 function renderRetentionCell(rec) {
   const hint = `<span class="text-secondary small">${rec.retention_overridden ? "custom" : "default"}</span>`;
   return `
@@ -74,7 +114,7 @@ function renderRetentionCell(rec) {
       <label class="visually-hidden" for="ret-${escapeHtml(rec.name)}">Days to keep ${escapeHtml(rec.name)}</label>
       <input id="ret-${escapeHtml(rec.name)}" type="number" class="form-control form-control-sm retention-input"
              min="1" max="3650" required value="${rec.retention_days}" data-original="${rec.retention_days}">
-      <span class="text-secondary small">days</span>
+      <span class="text-secondary small d-none d-sm-inline">days</span>
       <button type="submit" class="btn btn-primary btn-sm d-none" data-role="save">Save</button>
     </form>
     <div>${hint}</div>`;
@@ -90,25 +130,27 @@ function renderDeletedCell(rec) {
 
 function renderRow(rec) {
   const status = statusDisplay(rec.pyca_status);
+  const badge = `<span class="badge ${status.badge}" title="PyCA status: ${escapeHtml(rec.pyca_status)}">
+      <i class="bi ${status.icon}" aria-hidden="true"></i> ${escapeHtml(status.label)}
+    </span>`;
   const tr = document.createElement("tr");
   tr.dataset.venue = rec.venue;
   tr.dataset.name = rec.name;
   tr.innerHTML = `
     <td class="text-md-nowrap">
       <div>${escapeHtml(formatTime(rec.started_at))}</div>
-      <div class="text-secondary small"><code>${escapeHtml(rec.mediapackage_id || rec.name)}</code></div>
+      <div class="text-secondary small"><code class="recording-id d-none d-sm-inline-block" title="${escapeHtml(rec.mediapackage_id || rec.name)}">${escapeHtml(rec.mediapackage_id || rec.name)}</code></div>
     </td>
-    <td class="fw-semibold">${escapeHtml(rec.venue)}</td>
     <td>
-      <span class="badge ${status.badge}" title="PyCA status: ${escapeHtml(rec.pyca_status)}">
-        <i class="bi ${status.icon}" aria-hidden="true"></i> ${escapeHtml(status.label)}
-      </span>
+      <div class="fw-semibold text-md-nowrap">${escapeHtml(rec.venue)}</div>
+      <div class="d-sm-none mt-1">${badge}</div>
     </td>
-    <td class="d-none d-md-table-cell text-nowrap">${escapeHtml(formatBytes(rec.size_bytes))}</td>
+    <td class="d-none d-sm-table-cell">${badge}</td>
+    <td class="d-none d-xl-table-cell text-nowrap">${escapeHtml(formatBytes(rec.size_bytes))}</td>
     <td>${renderRetentionCell(rec)}</td>
     <td class="d-none d-sm-table-cell text-nowrap">${renderDeletedCell(rec)}</td>
     <td class="text-end">
-      <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" aria-label="Delete recording"
+      <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" data-action="delete" aria-label="Delete recording"
               ${rec.in_progress ? 'disabled title="Still being recorded or uploaded"' : ""}>
         <i class="bi bi-trash3" aria-hidden="true"></i><span class="d-none d-lg-inline"> Delete</span>
       </button>
@@ -159,6 +201,7 @@ async function load() {
       `Deleted ${defaultRetentionDays} days after recording unless changed below - ingested or not.`;
     recordings = list;
     populateVenueFilter();
+    renderSummary();
     render();
   } catch (err) {
     tbody.innerHTML = "";
@@ -180,6 +223,7 @@ async function saveRetention(tr, retentionDays) {
       body: JSON.stringify({ retention_days: retentionDays }),
     });
     recordings = recordings.map((r) => (r.venue === venue && r.name === name ? updated : r));
+    renderSummary();
     render();
     showToast(`Will be kept for ${retentionDays} days from recording`);
   } catch (err) {
@@ -212,6 +256,7 @@ async function deleteRecording(tr) {
     await api(`/recordings/${encodeURIComponent(rec.venue)}/${encodeURIComponent(rec.name)}`, { method: "DELETE" });
     recordings = recordings.filter((r) => r !== rec);
     populateVenueFilter();
+    renderSummary();
     render();
     showToast("Recording deleted");
   } catch (err) {

@@ -12,7 +12,16 @@
  */
 
 const POLL_MS = 10000;
-const FILTER_KEYS = ["venue", "action", "actor_type", "outcome"];
+const FILTER_KEYS = ["venue", "action", "actor_type", "outcome", "since"];
+const SUMMARY_DAYS = 7;
+
+// What each summary tile filters the table to (on top of its time window and the venue filter).
+const TILE_FILTERS = {
+  failures: { outcome: "failure" },
+  backups: { action: "instance.start", actor_type: "system", outcome: "success" },
+  manual: { actor_type: "operator" },
+  deleted: { action: "recording.deleted" },
+};
 
 const ACTION_LABEL = {
   "instance.create": "Created",
@@ -152,6 +161,72 @@ function showMessage(html) {
   message.classList.toggle("d-none", !html);
 }
 
+/** The summary tiles: counts for the last SUMMARY_DAYS, for the venue filter if one is set. */
+async function loadSummary() {
+  const venue = form.elements.venue.value.trim();
+  const params = new URLSearchParams({ days: SUMMARY_DAYS });
+  if (venue) params.set("venue", venue);
+  let summary;
+  try {
+    summary = await api(`/audit/summary?${params}`);
+  } catch {
+    return; // the table shows any outage; the tiles just keep their last values
+  }
+  const set = (id, text) => {
+    document.getElementById(id).textContent = text;
+  };
+  const scope = venue ? `${venue}, last ${summary.days} days` : `last ${summary.days} days`;
+
+  set("tile-failures-value", summary.failures);
+  set("tile-failures-sub", scope);
+  const failing = summary.failures > 0;
+  document.getElementById("tile-failures").classList.toggle("attention", failing);
+  const chip = document.getElementById("tile-failures-chip").classList;
+  chip.toggle("bg-secondary-subtle", !failing);
+  chip.toggle("text-secondary-emphasis", !failing);
+  chip.toggle("bg-danger-subtle", failing);
+  chip.toggle("text-danger-emphasis", failing);
+  document.querySelector("#tile-failures-chip i").className =
+    `bi ${failing ? "bi-exclamation-triangle-fill" : "bi-shield-check"}`;
+
+  set("tile-backups-value", summary.backups_started);
+  set(
+    "tile-backups-sub",
+    venue ? scope : `across ${summary.backup_venues} venue${summary.backup_venues === 1 ? "" : "s"}`
+  );
+  set("tile-manual-value", summary.manual_actions);
+  set("tile-manual-sub", scope);
+  set("tile-deleted-value", summary.recordings_deleted);
+  set("tile-deleted-sub", summary.bytes_freed ? `${formatBytes(summary.bytes_freed)} freed` : scope);
+
+  document.querySelectorAll("[data-tile]").forEach((tile) => {
+    tile.dataset.since = summary.since;
+  });
+}
+
+/** Clicking a tile shows exactly what it counted: its filter, its time window, the same venue. */
+function applyTile(tile) {
+  const venue = form.elements.venue.value;
+  form.reset();
+  form.elements.venue.value = venue;
+  form.elements.since.value = tile.dataset.since || "";
+  Object.entries(TILE_FILTERS[tile.dataset.tile]).forEach(([key, value]) => {
+    form.elements[key].value = value;
+  });
+  applyFilters();
+}
+
+function renderSinceChip() {
+  const since = form.elements.since.value;
+  document.getElementById("since-chip").classList.toggle("d-none", !since);
+  if (since) document.getElementById("since-chip-text").textContent = `Since ${formatTimePlain(since)}`;
+}
+
+function formatTimePlain(isoString) {
+  const date = parseUtc(isoString);
+  return date ? `${dateFormat.format(date)}, ${timeFormat.format(date)}` : isoString;
+}
+
 function renderAuditPagination(total) {
   renderPagination(paginationEl, {
     page,
@@ -218,9 +293,10 @@ async function load({ quiet = false } = {}) {
   }
 }
 
-/** Keep "x ago" current; refresh the first page, where new events appear. */
+/** Keep "x ago" current; refresh the first page, where new events appear, and the tiles. */
 async function poll() {
   updateRelativeTimes();
+  loadSummary();
   if (page === 1) await load({ quiet: true });
 }
 
@@ -239,6 +315,8 @@ function updateUrl() {
 function applyFilters() {
   page = 1; // a different filter starts from its first page
   updateUrl();
+  renderSinceChip();
+  loadSummary(); // the tiles follow the venue filter
   document.getElementById("clear-filters-btn").classList.toggle("d-none", !Object.keys(currentFilters()).length);
   shownIds = new Set();
   load();
@@ -263,7 +341,17 @@ function init() {
     form.reset();
     applyFilters();
   });
-  document.getElementById("refresh-btn").addEventListener("click", () => load());
+  document.getElementById("refresh-btn").addEventListener("click", () => {
+    loadSummary();
+    load();
+  });
+  document.querySelectorAll("[data-tile]").forEach((tile) =>
+    tile.addEventListener("click", () => applyTile(tile))
+  );
+  document.getElementById("since-chip-clear").addEventListener("click", () => {
+    form.elements.since.value = "";
+    applyFilters();
+  });
 
   // Pause polling while the tab is hidden; catch up immediately when it becomes visible again.
   document.addEventListener("visibilitychange", () => {
@@ -277,6 +365,8 @@ function init() {
 
   document.getElementById("clear-filters-btn").classList.toggle("d-none", !Object.keys(currentFilters()).length);
   page = Math.max(1, Number.parseInt(params.get("page"), 10) || 1);
+  renderSinceChip();
+  loadSummary();
   load();
   schedulePoll();
 }
