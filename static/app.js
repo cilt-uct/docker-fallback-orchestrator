@@ -70,6 +70,11 @@ const state = {
   recordingsByVenue: {},
   filter: { query: "", status: "all" },
   sort: { key: "venue", dir: "asc" },
+  page: 1,
+  pageSize: loadPageSize("instances"),
+  // Instances already shown at least once - only genuinely new ones get the "new row" highlight,
+  // not ones coming back into view on another page.
+  seenIds: new Set(),
   consecutiveFailures: 0,
   hasLoadedOnce: false,
 };
@@ -235,6 +240,7 @@ function clearFilters() {
   state.filter.status = "all";
   document.getElementById("search-input").value = "";
   document.getElementById("status-filter").value = "all";
+  state.page = 1;
   renderTable();
 }
 
@@ -258,6 +264,7 @@ function renderTable() {
     tbody.innerHTML = "";
     rowElements.clear();
     emptyState.classList.remove("d-none");
+    renderInstancesPagination(0);
     return;
   }
   emptyState.classList.add("d-none");
@@ -272,6 +279,7 @@ function renderTable() {
     </td></tr>`;
     tbody.querySelector("#no-results-clear-btn").addEventListener("click", clearFilters);
     rowElements.clear();
+    renderInstancesPagination(0);
     return;
   }
 
@@ -279,16 +287,22 @@ function renderTable() {
   const strayRow = tbody.querySelector("tr:not([data-id])");
   if (strayRow) strayRow.remove();
 
+  // Only the current page's rows are in the table; the refresh keeps you on your page.
+  state.page = Math.min(state.page, pageCount(list.length, state.pageSize));
+  const pageStart = (state.page - 1) * state.pageSize;
+  const pageList = list.slice(pageStart, pageStart + state.pageSize);
+
   const seenIds = new Set();
   let previousEl = null;
-  list.forEach((inst) => {
+  pageList.forEach((inst) => {
     seenIds.add(String(inst.id));
     let tr = rowElements.get(inst.id);
     let isNew = false;
     if (!tr) {
       tr = template.content.firstElementChild.cloneNode(true);
       rowElements.set(inst.id, tr);
-      isNew = true;
+      isNew = !state.seenIds.has(inst.id);
+      state.seenIds.add(inst.id);
     }
     populateRow(tr, inst, state.recordingsByVenue[inst.venue]);
 
@@ -302,7 +316,7 @@ function renderTable() {
     previousEl = tr;
   });
 
-  // Drop rows for instances that no longer exist / no longer match filters.
+  // Drop rows for instances that no longer exist, no longer match filters, or are on another page.
   for (const [id, tr] of rowElements) {
     if (!seenIds.has(String(id))) {
       tr.remove();
@@ -311,6 +325,22 @@ function renderTable() {
   }
 
   updateSortIndicators();
+  renderInstancesPagination(list.length);
+}
+
+function renderInstancesPagination(total) {
+  renderPagination(document.getElementById("instances-pagination"), {
+    page: state.page,
+    pageSize: state.pageSize,
+    total,
+    noun: total === 1 ? "instance" : "instances",
+    onChange: ({ page, pageSize }) => {
+      state.page = page;
+      if (pageSize !== state.pageSize) savePageSize("instances", pageSize);
+      state.pageSize = pageSize;
+      renderTable();
+    },
+  });
 }
 
 // Only for the *initial* load failing (skeleton rows would otherwise be stuck forever). Later poll
@@ -537,13 +567,16 @@ function initEvents() {
   document.getElementById("refresh-btn").addEventListener("click", () => refresh());
   document.getElementById("load-error-retry").addEventListener("click", () => refresh());
 
+  // Narrowing or re-sorting the list starts again from its first page.
   document.getElementById("search-input").addEventListener("input", (e) => {
     state.filter.query = e.target.value;
+    state.page = 1;
     renderTable();
   });
 
   document.getElementById("status-filter").addEventListener("change", (e) => {
     state.filter.status = e.target.value;
+    state.page = 1;
     renderTable();
   });
 
@@ -558,6 +591,7 @@ function initEvents() {
         state.sort.key = key;
         state.sort.dir = "asc";
       }
+      state.page = 1;
       renderTable();
     });
   });

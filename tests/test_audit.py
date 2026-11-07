@@ -243,3 +243,23 @@ def test_manual_stop_records_the_mediapackages_since_the_last_start(client, db, 
     assert (stop.action, stop.detail) == (audit.INSTANCE_STOP, {"mediapackage_ids": ["mp-9"]})
     # A fresh lifetime starts empty once it has been stopped.
     assert audit.mediapackages_since_last_stop(db, instance.id) == []
+
+
+def test_audit_endpoint_pages_by_offset_and_reports_the_total(client, db, make_instance):
+    a, b = make_instance(venue="room-a"), make_instance(venue="room-b")
+    for instance in (a, b, a, a, b):
+        audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance)
+    db.commit()
+
+    first = client.get("/audit", params={"limit": 2, "offset": 0})
+    second = client.get("/audit", params={"limit": 2, "offset": 2})
+    last = client.get("/audit", params={"limit": 2, "offset": 4})
+
+    assert first.headers["X-Total-Count"] == "5"
+    ids = [e["id"] for page in (first, second, last) for e in page.json()]
+    assert ids == sorted(ids, reverse=True) and len(set(ids)) == 5  # newest first, no gaps or repeats
+    assert len(last.json()) == 1
+    # The total follows the filters, not the page.
+    filtered = client.get("/audit", params={"venue": "room-a", "limit": 1})
+    assert (filtered.headers["X-Total-Count"], len(filtered.json())) == ("3", 1)
+    assert client.get("/audit", params={"offset": -1}).status_code == 422

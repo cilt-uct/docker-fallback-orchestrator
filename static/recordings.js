@@ -31,6 +31,8 @@ const timeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", tim
 
 let recordings = [];
 let defaultRetentionDays = null;
+let page = 1;
+let pageSize = loadPageSize("recordings");
 
 function statusDisplay(pycaStatus) {
   return STATUS_DISPLAY[pycaStatus] || NOT_INGESTED;
@@ -119,8 +121,22 @@ function render() {
   const shown = recordings.filter(
     (r) => (!venue || r.venue === venue) && (!status || statusDisplay(r.pyca_status).group === status)
   );
+  page = Math.min(page, pageCount(shown.length, pageSize));
+  const start = (page - 1) * pageSize;
   tbody.innerHTML = "";
-  shown.forEach((rec) => tbody.appendChild(renderRow(rec)));
+  shown.slice(start, start + pageSize).forEach((rec) => tbody.appendChild(renderRow(rec)));
+  renderPagination(document.getElementById("recordings-pagination"), {
+    page,
+    pageSize,
+    total: shown.length,
+    noun: shown.length === 1 ? "recording" : "recordings",
+    onChange: (next) => {
+      page = next.page;
+      if (next.pageSize !== pageSize) savePageSize("recordings", next.pageSize);
+      pageSize = next.pageSize;
+      render();
+    },
+  });
   document.getElementById("recording-count").textContent =
     shown.length === recordings.length
       ? `${recordings.length} recording${recordings.length === 1 ? "" : "s"}`
@@ -146,6 +162,7 @@ async function load() {
     render();
   } catch (err) {
     tbody.innerHTML = "";
+    renderPagination(document.getElementById("recordings-pagination"), { page: 1, pageSize, total: 0 });
     showMessage(
       `<i class="bi bi-exclamation-octagon display-5 d-block mb-2 text-danger" aria-hidden="true"></i>
        <p class="mb-0 fs-5 text-danger">Couldn&rsquo;t load recordings: ${escapeHtml(err.message)}</p>`
@@ -203,6 +220,7 @@ async function deleteRecording(tr) {
 }
 
 function applyFilters() {
+  page = 1; // a different filter starts from its first page
   const query = new URLSearchParams(currentFilters()).toString();
   history.replaceState(null, "", query ? `?${query}` : location.pathname);
   document.getElementById("clear-filters-btn").classList.toggle("d-none", !query);

@@ -3,14 +3,14 @@
 /*
  * pyca-orchestrator audit log page
  *
- * Reads GET /audit, newest first. Filters live in the URL query string, so a
- * filtered view (e.g. the dashboard's per-instance "View history" link) can
- * be linked to and survives a reload. Older events are paged in with
- * before_id; new ones are polled for and prepended, so rows already on
- * screen (and the scroll position) are left alone.
+ * Reads GET /audit, newest first, a page at a time (limit + offset; the total
+ * comes from the X-Total-Count header). Filters and the page live in the URL
+ * query string, so a filtered view (e.g. the dashboard's per-instance "View
+ * history" link) can be linked to and survives a reload. The first page is
+ * refreshed every few seconds, with new events highlighted; other pages stay
+ * still so rows don't shift while they're being read - only the total updates.
  */
 
-const PAGE_SIZE = 50;
 const POLL_MS = 10000;
 const FILTER_KEYS = ["venue", "action", "actor_type", "outcome"];
 
@@ -61,10 +61,11 @@ const DETAIL_LABEL = {
 const form = document.getElementById("audit-filters");
 const tbody = document.getElementById("audit-body");
 const message = document.getElementById("audit-message");
-const loadMoreWrap = document.getElementById("load-more-wrap");
+const paginationEl = document.getElementById("audit-pagination");
 
-let oldestId = null;
-let newestId = null;
+let page = 1;
+let pageSize = loadPageSize("audit");
+let shownIds = new Set(); // ids on screen, to highlight genuinely new events after a refresh
 let requestSeq = 0;
 let pollTimer = null;
 
@@ -151,35 +152,63 @@ function showMessage(html) {
   message.classList.toggle("d-none", !html);
 }
 
-async function load({ append = false } = {}) {
-  const seq = ++requestSeq;
-  const filters = currentFilters();
-  const hasFilters = Object.keys(filters).length > 0;
-  const params = new URLSearchParams({ ...filters, limit: PAGE_SIZE });
-  if (append && oldestId !== null) params.set("before_id", oldestId);
+function renderAuditPagination(total) {
+  renderPagination(paginationEl, {
+    page,
+    pageSize,
+    total,
+    noun: total === 1 ? "event" : "events",
+    onChange: (next) => {
+      page = next.page;
+      if (next.pageSize !== pageSize) savePageSize("audit", next.pageSize);
+      pageSize = next.pageSize;
+      updateUrl();
+      load();
+    },
+  });
+}
 
+function pageQuery() {
+  return new URLSearchParams({ ...currentFilters(), limit: pageSize, offset: (page - 1) * pageSize });
+}
+
+/** Load the current page. `quiet` (the background refresh) keeps the table on errors. */
+async function load({ quiet = false } = {}) {
+  const seq = ++requestSeq;
+  const hasFilters = Object.keys(currentFilters()).length > 0;
   const refreshBtn = document.getElementById("refresh-btn");
-  refreshBtn.classList.add("is-refreshing");
+  if (!quiet) refreshBtn.classList.add("is-refreshing");
   try {
-    const events = await api(`/audit?${params}`);
-    if (seq !== requestSeq) return; // a newer filter change superseded this request
-    if (!append) {
-      tbody.innerHTML = "";
-      newestId = events.length ? events[0].id : null;
+    let { items, total } = await apiPage(`/audit?${pageQuery()}`);
+    if (seq !== requestSeq) return; // a newer filter or page change superseded this request
+    const pages = pageCount(total, pageSize);
+    if (page > pages) {
+      // The page went away (events filtered out, or fewer than before) - show the last one instead.
+      page = pages;
+      updateUrl();
+      ({ items, total } = await apiPage(`/audit?${pageQuery()}`));
+      if (seq !== requestSeq) return;
     }
-    events.forEach((event) => tbody.appendChild(renderRow(event)));
-    if (events.length) oldestId = events[events.length - 1].id;
-    loadMoreWrap.classList.toggle("d-none", events.length < PAGE_SIZE);
+    const previouslyShown = shownIds;
+    tbody.innerHTML = "";
+    items.forEach((event) => {
+      const tr = renderRow(event);
+      if (quiet && !previouslyShown.has(event.id)) tr.classList.add("row-new");
+      tbody.appendChild(tr);
+    });
+    shownIds = new Set(items.map((event) => event.id));
+    renderAuditPagination(total);
     showMessage(
-      tbody.children.length
+      items.length
         ? ""
         : `<i class="bi bi-inbox display-5 d-block mb-2" aria-hidden="true"></i>
            <p class="mb-0 fs-5">${hasFilters ? "No events match these filters" : "Nothing has been recorded yet"}</p>`
     );
   } catch (err) {
-    if (seq !== requestSeq) return;
-    if (!append) tbody.innerHTML = "";
-    loadMoreWrap.classList.add("d-none");
+    if (seq !== requestSeq || quiet) return; // background refresh: the next tick or Refresh will retry
+    tbody.innerHTML = "";
+    shownIds = new Set();
+    renderAuditPagination(0);
     showMessage(
       `<i class="bi bi-exclamation-octagon display-5 d-block mb-2 text-danger" aria-hidden="true"></i>
        <p class="mb-0 fs-5 text-danger">Couldn&rsquo;t load the audit log: ${escapeHtml(err.message)}</p>`
@@ -189,32 +218,10 @@ async function load({ append = false } = {}) {
   }
 }
 
-/** Prepend anything recorded since the newest row on screen, and keep "x ago" current. */
+/** Keep "x ago" current; refresh the first page, where new events appear. */
 async function poll() {
   updateRelativeTimes();
-  const seq = requestSeq;
-  try {
-    const events = await api(`/audit?${new URLSearchParams({ ...currentFilters(), limit: PAGE_SIZE })}`);
-    if (seq !== requestSeq) return; // filters changed or a full load ran meanwhile
-    const fresh = events.filter((event) => newestId === null || event.id > newestId);
-    if (!fresh.length) return;
-    if (fresh.length === events.length && newestId !== null) {
-      // A whole page of new events: there may be a gap below it, so reload instead of prepending.
-      oldestId = null;
-      load();
-      return;
-    }
-    fresh.reverse().forEach((event) => {
-      const tr = renderRow(event);
-      tr.classList.add("row-new");
-      tbody.prepend(tr);
-    });
-    newestId = events[0].id;
-    if (oldestId === null) oldestId = events[events.length - 1].id;
-    showMessage("");
-  } catch {
-    // Background poll: stay quiet, the next tick or a manual Refresh will surface a real outage.
-  }
+  if (page === 1) await load({ quiet: true });
 }
 
 function schedulePoll() {
@@ -222,12 +229,18 @@ function schedulePoll() {
   pollTimer = setInterval(poll, POLL_MS);
 }
 
-function applyFilters() {
-  const filters = currentFilters();
-  const query = new URLSearchParams(filters).toString();
+function updateUrl() {
+  const params = new URLSearchParams(currentFilters());
+  if (page > 1) params.set("page", page);
+  const query = params.toString();
   history.replaceState(null, "", query ? `?${query}` : location.pathname);
-  document.getElementById("clear-filters-btn").classList.toggle("d-none", !query);
-  oldestId = null;
+}
+
+function applyFilters() {
+  page = 1; // a different filter starts from its first page
+  updateUrl();
+  document.getElementById("clear-filters-btn").classList.toggle("d-none", !Object.keys(currentFilters()).length);
+  shownIds = new Set();
   load();
 }
 
@@ -250,11 +263,7 @@ function init() {
     form.reset();
     applyFilters();
   });
-  document.getElementById("refresh-btn").addEventListener("click", () => {
-    oldestId = null;
-    load();
-  });
-  document.getElementById("load-more-btn").addEventListener("click", () => load({ append: true }));
+  document.getElementById("refresh-btn").addEventListener("click", () => load());
 
   // Pause polling while the tab is hidden; catch up immediately when it becomes visible again.
   document.addEventListener("visibilitychange", () => {
@@ -266,7 +275,9 @@ function init() {
     }
   });
 
-  applyFilters();
+  document.getElementById("clear-filters-btn").classList.toggle("d-none", !Object.keys(currentFilters()).length);
+  page = Math.max(1, Number.parseInt(params.get("page"), 10) || 1);
+  load();
   schedulePoll();
 }
 

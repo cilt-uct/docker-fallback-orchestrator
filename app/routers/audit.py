@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -21,9 +21,14 @@ def list_audit_events(
     until: datetime | None = None,
     before_id: int | None = None,
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    *,
+    response: Response,
     db: Session = Depends(get_db),
 ):
-    """Newest first. Page backwards by passing the last row's id as before_id."""
+    """Newest first. Page with limit + offset (the dashboard does); the X-Total-Count header
+    gives the number of events matching the filters. before_id also still works, for
+    paging backwards from a known event."""
     query = db.query(AuditEvent)
     if instance_id is not None:
         query = query.filter(AuditEvent.instance_id == instance_id)
@@ -41,4 +46,5 @@ def list_audit_events(
         query = query.filter(AuditEvent.occurred_at <= until)
     if before_id is not None:
         query = query.filter(AuditEvent.id < before_id)
-    return query.order_by(AuditEvent.id.desc()).limit(limit).all()
+    response.headers["X-Total-Count"] = str(query.count())
+    return query.order_by(AuditEvent.id.desc()).offset(offset).limit(limit).all()

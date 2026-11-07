@@ -1,6 +1,7 @@
 "use strict";
 
-/* Helpers shared by the dashboard (app.js), audit log (audit.js) and recordings (recordings.js) pages.
+/* Helpers shared by the dashboard (app.js), audit log (audit.js) and recordings (recordings.js) pages,
+   including the pagination controls every table uses.
    showToast and confirmAction need the Bootstrap JS bundle on the page; confirmAction also needs
    the #confirm-modal markup. */
 
@@ -43,6 +44,21 @@ function escapeHtml(str) {
 }
 
 async function api(path, options = {}) {
+  const res = await apiResponse(path, options);
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+/** GET a page from an endpoint that reports its total in X-Total-Count. Returns {items, total}. */
+async function apiPage(path) {
+  const res = await apiResponse(path);
+  const items = await res.json();
+  const total = Number(res.headers.get("X-Total-Count"));
+  return { items, total: Number.isFinite(total) ? total : items.length };
+}
+
+/** fetch() that throws an Error with the server's message (and error reference) on failure. */
+async function apiResponse(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
@@ -69,8 +85,7 @@ async function api(path, options = {}) {
     }
     throw new Error(detail);
   }
-  if (res.status === 204) return null;
-  return res.json();
+  return res;
 }
 
 function formatBytes(bytes) {
@@ -142,4 +157,100 @@ function confirmAction({ title = "Confirm", body, confirmLabel = "Confirm", dang
     modalEl.addEventListener("hidden.bs.modal", onHidden);
     modal.show();
   });
+}
+
+// ---------------------------------------------------------------------
+// Pagination controls, shared by every table
+// ---------------------------------------------------------------------
+
+const PAGE_SIZES = [10, 25, 50, 100];
+const DEFAULT_PAGE_SIZE = 25;
+
+/** The viewer's chosen page size for a table, remembered in this browser only. */
+function loadPageSize(table) {
+  try {
+    const size = Number(localStorage.getItem(`pageSize:${table}`));
+    return PAGE_SIZES.includes(size) ? size : DEFAULT_PAGE_SIZE;
+  } catch {
+    return DEFAULT_PAGE_SIZE;
+  }
+}
+
+function savePageSize(table, size) {
+  try {
+    localStorage.setItem(`pageSize:${table}`, String(size));
+  } catch {
+    // storage unavailable (private window, blocked) - the choice just isn't remembered
+  }
+}
+
+function pageCount(total, pageSize) {
+  return Math.max(1, Math.ceil(total / pageSize));
+}
+
+/** Page numbers to show: first, last, and the current page's neighbours, with gaps as null. */
+function pageNumbers(page, pages) {
+  const wanted = new Set([1, pages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= pages));
+  const sorted = [...wanted].sort((a, b) => a - b);
+  const out = [];
+  sorted.forEach((n, i) => {
+    if (i > 0 && n - sorted[i - 1] > 1) out.push(null);
+    out.push(n);
+  });
+  return out;
+}
+
+/**
+ * Render "Showing a-b of N", a page-size choice and page links into `container`.
+ * onChange({ page, pageSize }) is called when the viewer picks a page or a size.
+ */
+function renderPagination(container, { page, pageSize, total, noun = "items", onChange }) {
+  if (total === 0) {
+    container.innerHTML = "";
+    container.classList.add("d-none");
+    return;
+  }
+  container.classList.remove("d-none");
+  const pages = pageCount(total, pageSize);
+  const first = (page - 1) * pageSize + 1;
+  const last = Math.min(total, page * pageSize);
+  const sizeId = `${container.id}-size`;
+
+  const item = (label, target, { disabled = false, active = false, aria = "" } = {}) => `
+    <li class="page-item${disabled ? " disabled" : ""}${active ? " active" : ""}">
+      <button type="button" class="page-link" data-page="${target}" ${disabled ? "disabled" : ""}
+        ${active ? 'aria-current="page"' : ""} ${aria ? `aria-label="${aria}"` : ""}>${label}</button>
+    </li>`;
+  const links = pageNumbers(page, pages)
+    .map((n) =>
+      n === null
+        ? '<li class="page-item disabled"><span class="page-link">&hellip;</span></li>'
+        : item(n, n, { active: n === page, aria: `Page ${n}` })
+    )
+    .join("");
+
+  container.innerHTML = `
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+      <span class="text-secondary small">Showing ${first}&ndash;${last} of ${total} ${escapeHtml(noun)}</span>
+      <div class="d-flex flex-wrap align-items-center gap-2">
+        <label for="${sizeId}" class="text-secondary small">Per page</label>
+        <select id="${sizeId}" class="form-select form-select-sm page-size-select">
+          ${PAGE_SIZES.map((n) => `<option value="${n}"${n === pageSize ? " selected" : ""}>${n}</option>`).join("")}
+        </select>
+        <nav aria-label="Pages">
+          <ul class="pagination pagination-sm mb-0">
+            ${item('<i class="bi bi-chevron-left" aria-hidden="true"></i>', page - 1, { disabled: page <= 1, aria: "Previous page" })}
+            ${links}
+            ${item('<i class="bi bi-chevron-right" aria-hidden="true"></i>', page + 1, { disabled: page >= pages, aria: "Next page" })}
+          </ul>
+        </nav>
+      </div>
+    </div>`;
+
+  container.querySelectorAll("[data-page]").forEach((btn) =>
+    btn.addEventListener("click", () => onChange({ page: Number(btn.dataset.page), pageSize }))
+  );
+  container
+    .querySelector(".page-size-select")
+    .addEventListener("change", (e) => onChange({ page: 1, pageSize: Number(e.target.value) }));
 }

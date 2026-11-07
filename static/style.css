@@ -413,6 +413,18 @@ tr.row-new {
   }
 }
 
+/* ---- Pagination (every table) ---- */
+
+/* Same 1rem inset as the table's outer columns and the card header. */
+.table-pagination {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--bs-border-color-translucent);
+}
+
+.page-size-select {
+  width: auto;
+}
+
 /* ---- Recordings page ---- */
 
 .retention-input {
