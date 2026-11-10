@@ -32,6 +32,7 @@ files            = '{{dir}}/{{name}}.mp4'
 url              = '$opencast_url'
 username         = '$opencast_username'
 password         = '$opencast_password'
+certificate      = '$certificate'
 
 
 [ui]

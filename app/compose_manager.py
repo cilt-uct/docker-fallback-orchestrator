@@ -16,6 +16,7 @@ import docker
 from docker.errors import DockerException
 from jinja2 import Environment, FileSystemLoader
 
+from app import pyca_config
 from app.config import settings
 from app.models import Instance
 
@@ -50,6 +51,8 @@ def render_compose_file(instance: Instance) -> Path:
         ui_port=instance.ui_port,
         recordings_dir=settings.venue_recordings_dir(instance.venue),
         compose_project=instance.compose_project,
+        ca_bundle=settings.pyca_ca_bundle,
+        ca_bundle_mount=pyca_config.CA_BUNDLE_MOUNT,
     )
 
     config_dir = settings.instance_dir(instance.venue)

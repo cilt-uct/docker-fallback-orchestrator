@@ -7,6 +7,7 @@ Recordings are built on a temporary disk laid out like the real thing:
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -303,3 +304,27 @@ def test_data_folder_is_created_and_handed_to_pycas_user_when_root(make_instance
 
     assert path == settings.instance_dir("lt1") / "data" and path.is_dir()
     assert chowned == [(path, settings.pyca_uid)]
+
+
+def test_backups_trust_the_configured_ca_bundle(make_instance, monkeypatch, tmp_path):
+    # The PyCA image's CA bundle is old; without this, an HTTPS Opencast can be unreachable.
+    monkeypatch.setattr(settings, "instances_dir", tmp_path)
+    monkeypatch.setattr(settings, "pyca_ca_bundle", Path("/etc/ssl/certs/ca-certificates.crt"))
+    instance = make_instance(venue="lt1", rtsp_source="rtsp://cam/s")
+
+    compose = compose_manager.render_compose_file(instance).read_text()
+    conf = pyca_config.render_pyca_conf(instance, "admin", "pw")
+
+    assert compose.count('"/etc/ssl/certs/ca-certificates.crt:/etc/pyca/ca-bundle.pem:ro"') == 5
+    assert "certificate      = '/etc/pyca/ca-bundle.pem'" in conf
+
+
+def test_backups_use_pycas_own_ca_bundle_by_default(make_instance, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "instances_dir", tmp_path)
+    instance = make_instance(venue="lt1", rtsp_source="rtsp://cam/s")
+
+    compose = compose_manager.render_compose_file(instance).read_text()
+    conf = pyca_config.render_pyca_conf(instance, "admin", "pw")
+
+    assert "ca-bundle" not in compose
+    assert "certificate      = ''" in conf

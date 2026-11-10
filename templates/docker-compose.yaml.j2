@@ -15,6 +15,9 @@ services:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
+{%- if ca_bundle %}
+      - "{{ ca_bundle }}:{{ ca_bundle_mount }}:ro"
+{%- endif %}
 
   pyca-ingest:
     container_name: {{ compose_project }}-ingest
@@ -25,6 +28,9 @@ services:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
+{%- if ca_bundle %}
+      - "{{ ca_bundle }}:{{ ca_bundle_mount }}:ro"
+{%- endif %}
 
   pyca-capture:
     container_name: {{ compose_project }}-capture
@@ -35,6 +41,9 @@ services:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
+{%- if ca_bundle %}
+      - "{{ ca_bundle }}:{{ ca_bundle_mount }}:ro"
+{%- endif %}
 
   pyca-agentstate:
     container_name: {{ compose_project }}-agentstate
@@ -45,6 +54,9 @@ services:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
+{%- if ca_bundle %}
+      - "{{ ca_bundle }}:{{ ca_bundle_mount }}:ro"
+{%- endif %}
 
   pyca-ui:
     container_name: {{ compose_project }}-ui
@@ -55,5 +67,8 @@ services:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
       - "{{ recordings_dir }}:/var/lib/pyca/recordings"
+{%- if ca_bundle %}
+      - "{{ ca_bundle }}:{{ ca_bundle_mount }}:ro"
+{%- endif %}
     ports:
       - "{{ ui_port }}:8000"

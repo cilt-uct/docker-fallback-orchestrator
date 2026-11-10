@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # "localhost" when the controller runs on the host; from inside a container, the host's
     # address - e.g. host.docker.internal (see docker-compose.yml).
     pyca_ui_host: str = "localhost"
+    # Host path of a CA bundle the backups trust for Opencast's HTTPS certificate, e.g. the
+    # server's /etc/ssl/certs/ca-certificates.crt. The PyCA image's own bundle is old, so an
+    # Opencast the controller trusts can still fail in PyCA with "self signed certificate".
+    pyca_ca_bundle: Path | None = None
 
     ui_port_range_start: int = 9000
     ui_port_range_end: int = 9100

@@ -6,6 +6,8 @@ from app.config import settings
 from app.models import Instance
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "pyca.conf.template"
+# Where PYCA_CA_BUNDLE is mounted inside each PyCA container.
+CA_BUNDLE_MOUNT = "/etc/pyca/ca-bundle.pem"
 
 
 def generate_ui_credentials() -> tuple[str, str]:
@@ -24,6 +26,7 @@ def render_pyca_conf(instance: Instance, ui_username: str, ui_password: str) -> 
         ui_username=ui_username,
         ui_password=ui_password,
         ui_port=instance.ui_port,
+        certificate=CA_BUNDLE_MOUNT if settings.pyca_ca_bundle else "",
     )
 
 
