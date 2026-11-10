@@ -125,6 +125,10 @@ ruff check . && ruff format --check .
 
 CI runs both on every push and pull request.
 
+To test a deployment end to end against its Opencast with a fake venue, run
+`scripts/demo_test.sh run` on the controller's host, then
+`scripts/demo_test.sh cleanup` (details at the top of the script).
+
 ## Important
 
 - **There is no login.** Anyone who can reach port 8090 can start, stop and
