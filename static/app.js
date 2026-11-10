@@ -183,7 +183,7 @@ function populateRow(tr, inst, bytes) {
   portCell.innerHTML = "";
   if (inst.status === "running") {
     const link = document.createElement("a");
-    link.href = `http://localhost:${inst.ui_port}`;
+    link.href = `http://${window.location.hostname}:${inst.ui_port}`;
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = inst.ui_port;
