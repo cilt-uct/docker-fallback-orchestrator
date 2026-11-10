@@ -89,7 +89,7 @@ recordings() {
 }
 
 save_state() { printf '%s=%s\n' "$1" "$2" >>"$STATE_FILE"; }
-load_state() { [[ -f $STATE_FILE ]] && grep -E "^$1=" "$STATE_FILE" | tail -1 | cut -d= -f2- || true; }
+load_state() { [[ -f $STATE_FILE ]] && grep -E "^$1=" "$STATE_FILE" | cut -d= -f2- || true; }
 
 preflight() {
   command -v python3 >/dev/null || fail "python3 is needed to read JSON"
@@ -151,10 +151,12 @@ schedule_event() {
     --form-string 'acl=[{"allow":true,"role":"ROLE_ADMIN","action":"read"},{"allow":true,"role":"ROLE_ADMIN","action":"write"}]' \
     --form-string "scheduling={\"agent_id\":\"$AGENT\",\"start\":\"$start\",\"end\":\"$end\",\"inputs\":[\"default\"]}" \
     --form-string "processing={\"workflow\":\"$WORKFLOW\",\"configuration\":{}}")
+  if [[ $(status_of "$resp") == 409 ]]; then
+    fail "'$AGENT' already has a lecture at that time (from an earlier run?): $(body_of "$resp") - let it run, or delete it in Opencast and retry"
+  fi
   [[ $(status_of "$resp") == 201 ]] || fail "could not schedule the event (HTTP $(status_of "$resp")): $(body_of "$resp")"
   event_id=$(body_of "$resp" | json "d['identifier']")
   save_state EVENT_ID "$event_id"
-  save_state END "$end"
   log "Scheduled event $event_id: $start -> $end UTC (workflow '$WORKFLOW')"
 }
 
@@ -209,11 +211,11 @@ cleanup() {
       log "could not delete the backup - do it from the dashboard"
   fi
 
-  event_id=$(load_state EVENT_ID)
-  if [[ -n $event_id ]]; then
+  # Every lecture any run scheduled since the last cleanup.
+  for event_id in $(load_state EVENT_ID); do
     resp=$(oc DELETE "/api/events/$event_id")
     log "Event $event_id deleted (HTTP $(status_of "$resp"))"
-  fi
+  done
 
   resp=$(oc DELETE "/capture-admin/agents/$AGENT")
   log "Agent '$AGENT' removed (HTTP $(status_of "$resp"))"
@@ -225,7 +227,6 @@ cleanup() {
 
 case ${1:-} in
   run)
-    rm -f "$STATE_FILE"
     preflight
     start_test_stream
     register_agent
