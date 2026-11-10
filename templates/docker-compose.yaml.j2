@@ -11,6 +11,8 @@ services:
     command: schedule
     image: {{ pyca_image }}
     restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
@@ -24,6 +26,8 @@ services:
     command: ingest
     image: {{ pyca_image }}
     restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
@@ -37,6 +41,8 @@ services:
     command: capture
     image: {{ pyca_image }}
     restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
@@ -50,6 +56,8 @@ services:
     command: agentstate
     image: {{ pyca_image }}
     restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca
@@ -63,6 +71,8 @@ services:
     entrypoint: ["gunicorn", "--config=/etc/pyca/gunicorn.conf.py", "pyca.ui:app"]
     image: {{ pyca_image }}
     restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
     volumes:
       - ./pyca.conf:/etc/pyca/pyca.conf:ro
       - ./data:/var/lib/pyca

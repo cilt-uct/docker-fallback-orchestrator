@@ -28,6 +28,7 @@ services:
       MYSQL_HOST: ${CONTROLLER_MYSQL_HOST:-${MYSQL_HOST:-mysql}}
       OPENCAST_HOST: ${CONTROLLER_OPENCAST_HOST:-${OPENCAST_HOST:-localhost}}
       ALLOW_PLACEHOLDER_SECRETS: ${ALLOW_PLACEHOLDER_SECRETS:-false}
+      TZ: Africa/Johannesburg
     ports:
       - "${CONTROLLER_PORT:-8090}:8090"
     volumes:
