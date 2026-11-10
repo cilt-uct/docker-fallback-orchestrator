@@ -290,3 +290,16 @@ def test_recordings_folder_is_created_and_handed_to_pycas_user_when_root(
 
     assert path == tmp_path / "lt1" and path.is_dir()
     assert chowned == [(path, settings.pyca_uid)]
+
+
+def test_data_folder_is_created_and_handed_to_pycas_user_when_root(make_instance, monkeypatch, tmp_path):
+    # PyCA can't create its database in a root-owned folder, so every service exits.
+    monkeypatch.setattr(settings, "instances_dir", tmp_path)
+    monkeypatch.setattr(instance_lifecycle.os, "geteuid", lambda: 0)
+    chowned = []
+    monkeypatch.setattr(instance_lifecycle.os, "chown", lambda path, uid, gid: chowned.append((path, uid)))
+
+    path = instance_lifecycle.prepare_data_dir(make_instance(venue="lt1"))
+
+    assert path == settings.instance_dir("lt1") / "data" and path.is_dir()
+    assert chowned == [(path, settings.pyca_uid)]

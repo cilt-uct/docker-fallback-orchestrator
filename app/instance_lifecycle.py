@@ -86,6 +86,7 @@ def provision(instance: Instance) -> None:
             "a backup that could never capture anything"
         )
     ensure_ui_credentials(instance)
+    prepare_data_dir(instance)
     prepare_recordings_dir(instance)
     pyca_config.write_pyca_conf(instance, instance.ui_username, instance.ui_password)
     compose_manager.render_compose_file(instance)
@@ -106,15 +107,14 @@ def recordings_dir(instance: Instance) -> Path:
     return settings.venue_recordings_dir(instance.venue)
 
 
-def prepare_recordings_dir(instance: Instance) -> Path:
-    """Create the venue's recordings folder before PyCA starts, writable by PyCA.
+def _make_pyca_dir(path: Path) -> Path:
+    """Create a folder PyCA bind-mounts, writable by PyCA.
 
     Left to Docker, a missing bind-mount source is created owned by root, which PyCA
     (running as PYCA_UID) can't write to. When the controller runs as root - as it does
     in its container - the folder is handed to that user; otherwise it's created as the
     controller's own user, which must then be able to grant PyCA access itself.
     """
-    path = recordings_dir(instance)
     path.mkdir(parents=True, exist_ok=True)
     if os.geteuid() == 0:
         try:
@@ -122,6 +122,16 @@ def prepare_recordings_dir(instance: Instance) -> Path:
         except OSError as exc:
             logger.warning("Could not hand %s to PyCA's user %s: %s", path, settings.pyca_uid, exc)
     return path
+
+
+def prepare_data_dir(instance: Instance) -> Path:
+    """Create the instance's data folder (PyCA's sqlite database) before PyCA starts."""
+    return _make_pyca_dir(settings.instance_dir(instance.venue) / "data")
+
+
+def prepare_recordings_dir(instance: Instance) -> Path:
+    """Create the venue's recordings folder before PyCA starts."""
+    return _make_pyca_dir(recordings_dir(instance))
 
 
 def dir_size_bytes(path: Path) -> int:
