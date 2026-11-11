@@ -265,16 +265,18 @@ def test_manual_start_saves_ui_credentials_before_docker(client, db, make_instan
 # ---- 7. restart applies current config; 8. Manual flag on every response --------------------
 
 
-def test_restart_rewrites_config_and_recreates(client, make_instance, monkeypatch, tmp_path):
+def test_restart_rewrites_config_and_stops_then_starts(client, make_instance, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "instances_dir", tmp_path / "i")
     monkeypatch.setattr(settings, "recordings_dir", tmp_path / "r")
     ran = []
     monkeypatch.setattr(compose_manager, "_run_compose", lambda instance, *args: ran.append(args))
-    instance_id = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://new-cam/s").id
+    instance = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://new-cam/s")
+    compose_manager.render_compose_file(instance)  # it was started before
 
-    assert client.post(f"/instances/{instance_id}/restart").status_code == 200
+    assert client.post(f"/instances/{instance.id}/restart").status_code == 200
 
-    assert ran == [("up", "-d", "--force-recreate")]
+    # A full stop first, so events the stop interrupts can be repaired before PyCA restarts.
+    assert ran == [("down",), ("up", "-d")]
     assert "rtsp://new-cam/s" in (tmp_path / "i" / "room-1" / "pyca.conf").read_text()
 
 

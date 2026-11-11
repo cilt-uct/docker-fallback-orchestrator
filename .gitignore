@@ -221,4 +221,5 @@ __marimo__/
 instances/*/
 !instances/.gitkeep
 recordings/
+config/pyca-ports.yaml
 dev/

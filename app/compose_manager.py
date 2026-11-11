@@ -97,12 +97,6 @@ def down(instance: Instance) -> None:
     _run_compose(instance, "down")
 
 
-def recreate(instance: Instance) -> None:
-    """Restart the containers on the current compose file and pyca.conf - unlike
-    `docker compose restart`, which would keep the old config."""
-    _run_compose(instance, "up", "-d", "--force-recreate")
-
-
 def has_running_containers(instance: Instance) -> bool:
     """True if any of the instance's containers is running. Raises DockerUnavailableError."""
     return any(c["status"] == "running" for c in container_statuses(instance))

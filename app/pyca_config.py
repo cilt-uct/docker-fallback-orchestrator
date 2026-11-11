@@ -1,4 +1,3 @@
-import secrets
 from pathlib import Path
 from string import Template
 
@@ -10,8 +9,8 @@ TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "pyca.con
 CA_BUNDLE_MOUNT = "/etc/pyca/ca-bundle.pem"
 
 
-def generate_ui_credentials() -> tuple[str, str]:
-    return "admin", secrets.token_urlsafe(16)
+def ui_credentials() -> tuple[str, str]:
+    return settings.pyca_ui_username, settings.pyca_ui_password
 
 
 def render_pyca_conf(instance: Instance, ui_username: str, ui_password: str) -> str:

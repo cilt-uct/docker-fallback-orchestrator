@@ -18,6 +18,7 @@ import logging
 import re
 import shutil
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,6 +49,14 @@ PYCA_STATUS = {
 }
 # Being written or sent right now - deleting would cut it off mid-way.
 IN_PROGRESS_STATUSES = {"recording", "uploading"}
+# What an event PyCA was stopped in the middle of becomes before PyCA starts again. PyCA
+# never fixes these itself, and a stale one would block teardown and clean-up for good.
+# Both targets get a "Retry upload" button on PyCA's page; an interrupted recording's file
+# is fragmented MP4, so what was captured is playable and can be reviewed and ingested.
+INTERRUPTED_STATUS_REPAIRS = {
+    2: 9,  # recording -> paused after recording
+    5: 6,  # uploading -> failed uploading
+}
 
 
 @dataclass
@@ -92,6 +101,51 @@ def _pyca_statuses(venue: str) -> dict[tuple[str, int], str]:
         logger.warning("Could not read PyCA's database for %s: %s", venue, exc)
         return {}
     return {(uid, int(start)): PYCA_STATUS.get(status, "unknown") for uid, start, status in rows}
+
+
+def repair_interrupted(venue: str) -> list[dict]:
+    """Mark events the venue's PyCA was recording or uploading when it was stopped as
+    interrupted (see INTERRUPTED_STATUS_REPAIRS), and return what was changed.
+
+    Writes to PyCA's own database, so only call it while none of the venue's PyCA
+    containers are running.
+    """
+    db_path = settings.instance_dir(venue) / "data" / "pyca.db"
+    if not db_path.is_file():
+        return []
+    stale = ",".join(str(status) for status in INTERRUPTED_STATUS_REPAIRS)
+    try:
+        with closing(sqlite3.connect(db_path, timeout=5)) as conn:
+            rows = conn.execute(
+                f"SELECT uid, start, status FROM recorded_event WHERE status IN ({stale})"
+            ).fetchall()
+            for uid, start, status in rows:
+                conn.execute(
+                    "UPDATE recorded_event SET status = ? WHERE uid = ? AND start = ?",
+                    (INTERRUPTED_STATUS_REPAIRS[status], uid, start),
+                )
+            conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("Could not repair interrupted events in PyCA's database for %s: %s", venue, exc)
+        return []
+
+    repaired = [
+        {
+            "mediapackage_id": uid,
+            "from": PYCA_STATUS[status],
+            "to": PYCA_STATUS[INTERRUPTED_STATUS_REPAIRS[status]],
+        }
+        for uid, _start, status in rows
+    ]
+    for change in repaired:
+        logger.warning(
+            "%s: event %s was interrupted while %s - marked %s",
+            venue,
+            change["mediapackage_id"],
+            change["from"],
+            change["to"],
+        )
+    return repaired
 
 
 def _dir_size(path: Path) -> int:

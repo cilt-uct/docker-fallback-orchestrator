@@ -64,6 +64,7 @@ All behaviour is configurable through environment variables (`.env`).
 | `RECORDINGS_DIR` | `/data/pyca-recordings` | Where recordings are stored |
 | `INSTANCES_DIR` | `./instances` | Each backup's config files and PyCA state |
 | `UI_PORT_RANGE_START` / `_END` | `9000` / `9100` | Ports for the backups' PyCA web pages |
+| `PYCA_PORTS_FILE` | `config/pyca-ports.yaml` | Fixed PyCA page port per venue (see `config/pyca-ports.example.yaml`); unlisted venues get a free port from the range |
 | `COMPOSE_TIMEOUT_SECONDS` | `300` | Give up on a stuck `docker compose` command |
 | `PYCA_IMAGE` | `quay.io/opencast/pyca` | PyCA image used for backups |
 

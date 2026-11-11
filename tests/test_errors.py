@@ -87,7 +87,7 @@ def test_create_with_no_free_ports_is_a_conflict_not_a_500(client, db, monkeypat
 
 def test_create_losing_a_race_for_the_port_is_a_conflict(client, db, monkeypatch, make_instance):
     taken = make_instance(venue="room-a")
-    monkeypatch.setattr(instance_lifecycle, "allocate_port", lambda db: taken.ui_port)
+    monkeypatch.setattr(instance_lifecycle, "allocate_port", lambda db, venue: taken.ui_port)
 
     resp = client.post("/instances", json={"venue": "room-b", "agent_id": "agent-1"})
 
@@ -152,7 +152,7 @@ def test_compose_timeout_and_missing_binary_become_compose_errors(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _raise(FileNotFoundError("docker")))
     with pytest.raises(compose_manager.ComposeError, match="Could not run docker compose"):
-        compose_manager.recreate(instance)
+        compose_manager.up(instance)
 
 
 def test_compose_calls_are_bounded_by_the_configured_timeout(monkeypatch):

@@ -13,10 +13,10 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import compose_manager, pyca_config
+from app import compose_manager, pyca_config, recordings
 from app.config import safe_name, settings
 from app.models import Instance, InstanceStatus
-from app.port_allocator import allocate_port
+from app.port_allocator import allocate_port, load_port_map
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | No
         venue=venue,
         agent_id=agent_id,
         rtsp_source=rtsp_source,
-        ui_port=allocate_port(db),
+        ui_port=allocate_port(db, venue),
         # Venues the engine creates are named after Opencast agent IDs, which can contain
         # anything; safe_name keeps the Docker names and folders valid.
         compose_project=f"pyca-{safe_name(venue)}",
@@ -70,12 +70,45 @@ def build_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | No
 
 
 def ensure_ui_credentials(instance: Instance) -> None:
-    """Give the instance its PyCA UI login if it has none. Existing credentials are kept, not
-    rotated on restart: operators log in with them and the decision engine uses them to check
-    the backup's PyCA before teardown. Callers should commit before starting Docker, so a
-    crash mid-start can't leave a running PyCA whose password the database doesn't know."""
-    if not instance.ui_username or not instance.ui_password:
-        instance.ui_username, instance.ui_password = pyca_config.generate_ui_credentials()
+    """Give the instance the PyCA UI login from settings (PYCA_UI_USERNAME/PASSWORD).
+
+    Stored on the instance because the decision engine uses it to check the backup's PyCA
+    before teardown, and a running PyCA keeps the login it was started with: a changed
+    setting takes effect at the next start or restart. Callers should commit before starting
+    Docker, so a crash mid-start can't leave a running PyCA whose login the database doesn't
+    know."""
+    instance.ui_username, instance.ui_password = pyca_config.ui_credentials()
+
+
+def apply_port_map(db: Session, instance: Instance) -> None:
+    """Move the instance to its mapped port, or off a port mapped to another venue.
+
+    Called before each start or restart, so an edited port map takes effect then (a running
+    PyCA keeps its port until restarted). Callers commit before starting Docker, so the
+    database always knows the port PyCA is on. If another instance holds the mapped port,
+    the instance keeps its current one: a backup that records matters more than its port.
+    """
+    port_map = load_port_map()
+    port = port_map.get(instance.venue)
+    if port is None:
+        if instance.ui_port not in port_map.values():
+            return
+        port = allocate_port(db, instance.venue)  # reserved for another venue - move off it
+    if port == instance.ui_port:
+        return
+    holder = db.query(Instance).filter(Instance.ui_port == port, Instance.id != instance.id).first()
+    if holder:
+        logger.warning(
+            "Port %s is mapped to %s but %s is using it - keeping port %s until %s moves",
+            port,
+            instance.venue,
+            holder.venue,
+            instance.ui_port,
+            holder.venue,
+        )
+        return
+    logger.info("Moving %s's PyCA page from port %s to %s", instance.venue, instance.ui_port, port)
+    instance.ui_port = port
 
 
 def provision(instance: Instance) -> None:
@@ -92,15 +125,37 @@ def provision(instance: Instance) -> None:
     compose_manager.render_compose_file(instance)
 
 
-def provision_and_start(instance: Instance) -> None:
+def repair_interrupted_events(instance: Instance) -> list[dict]:
+    """Fix up events PyCA was stopped in the middle of (see recordings.repair_interrupted),
+    unless the instance's PyCA is running - then its database isn't ours to change."""
+    if not (settings.instance_dir(instance.venue) / "data" / "pyca.db").is_file():
+        return []
+    try:
+        if compose_manager.has_running_containers(instance):
+            return []
+    except compose_manager.DockerUnavailableError as exc:
+        logger.warning(
+            "Not repairing %s's PyCA database - can't tell if it's running: %s", instance.venue, exc
+        )
+        return []
+    return recordings.repair_interrupted(instance.venue)
+
+
+def provision_and_start(instance: Instance) -> list[dict]:
+    """Start the instance; returns any interrupted events repaired first, for the audit log."""
     provision(instance)
+    repaired = repair_interrupted_events(instance)
     compose_manager.up(instance)
+    return repaired
 
 
-def provision_and_restart(instance: Instance) -> None:
-    """Restart with freshly written config, so e.g. a changed camera URL takes effect."""
-    provision(instance)
-    compose_manager.recreate(instance)
+def provision_and_restart(instance: Instance) -> list[dict]:
+    """Restart with freshly written config, so e.g. a changed camera URL takes effect.
+
+    A full stop and start rather than a recreate in place, so events interrupted by the
+    stop can be repaired while PyCA is down."""
+    compose_manager.down(instance)
+    return provision_and_start(instance)
 
 
 def recordings_dir(instance: Instance) -> Path:

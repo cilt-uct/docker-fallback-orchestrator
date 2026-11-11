@@ -10,6 +10,7 @@ from app.config import settings
 from app.database import Base, engine
 from app.decision_engine import run_forever
 from app.errors import register_exception_handlers
+from app.port_allocator import load_port_map
 from app.recordings import run_cleanup_forever
 from app.routers import audit, instances, monitoring, recordings, web
 
@@ -34,6 +35,9 @@ async def lifespan(app: FastAPI):
         if not settings.allow_placeholder_secrets:
             raise RuntimeError(message)
         logger.warning("%s; continuing because ALLOW_PLACEHOLDER_SECRETS is set", message)
+
+    port_map = load_port_map()  # a broken file stops startup here, not at a lecture
+    logger.info("PyCA port map: %d venue(s) from %s", len(port_map), settings.pyca_ports_file)
 
     # TODO: replace with Alembic migrations once the schema stabilises.
     Base.metadata.create_all(bind=engine)

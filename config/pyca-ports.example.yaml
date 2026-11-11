@@ -1,0 +1,17 @@
+# Fixed ports for each venue's backup PyCA web page (http://<server>:<port>).
+#
+# Copy this file to config/pyca-ports.yaml (git-ignored) and list your venues.
+# The venue is the capture agent ID in Opencast, as shown on the dashboard.
+#
+#   - A listed venue always gets its port. Edits apply the next time that
+#     backup starts or restarts; no controller restart needed.
+#   - Venues not listed get the lowest free port in UI_PORT_RANGE_START-_END
+#     that isn't listed here.
+#   - Each port may be listed once. The controller won't start with a broken file.
+#
+# Keep listed ports open in the server's firewall, and clear of other services
+# (the dashboard uses 8090).
+
+orchestrator-test: 9016
+# lt1: 9001
+# lt2: 9002

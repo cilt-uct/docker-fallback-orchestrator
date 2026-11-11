@@ -22,6 +22,7 @@ from app.errors import new_error_id
 from app.instance_lifecycle import (
     InstanceBusyError,
     InstanceNotStartableError,
+    apply_port_map,
     build_instance,
     dir_size_bytes,
     ensure_ui_credentials,
@@ -134,9 +135,7 @@ def create_instance(
     try:
         instance = build_instance(db, payload.venue, payload.agent_id, payload.rtsp_source)
     except NoPortsAvailableError as exc:
-        raise _create_rejected(
-            db, actor, payload, str(exc), f"{exc} - delete an unused instance or widen the range"
-        ) from exc
+        raise _create_rejected(db, actor, payload, str(exc), str(exc)) from exc
 
     db.add(instance)
     try:
@@ -201,12 +200,20 @@ def start_instance(
         ensure_ui_credentials(instance)
         db.commit()
         try:
-            provision_and_start(instance)
+            apply_port_map(db, instance)
+            db.commit()
+            repaired = provision_and_start(instance)
             instance.status = InstanceStatus.running
             instance.last_error = None
         except Exception as exc:  # noqa: BLE001 - classified in _action_failed
             raise _action_failed(db, actor, audit.INSTANCE_START, "start", instance, exc) from exc
-        audit.record(db, actor=actor, action=audit.INSTANCE_START, instance=instance)
+        audit.record(
+            db,
+            actor=actor,
+            action=audit.INSTANCE_START,
+            instance=instance,
+            detail={"repaired_pyca_events": repaired} if repaired else None,
+        )
         db.commit()
     db.refresh(instance)
     return _mark_operator_hold(db, instance)
@@ -249,11 +256,19 @@ def restart_instance(
     instance = _get_instance_or_404(db, instance_id)
     with _locked(instance):
         try:
-            provision_and_restart(instance)
+            apply_port_map(db, instance)
+            db.commit()
+            repaired = provision_and_restart(instance)
             instance.last_error = None
         except Exception as exc:  # noqa: BLE001 - classified in _action_failed
             raise _action_failed(db, actor, audit.INSTANCE_RESTART, "restart", instance, exc) from exc
-        audit.record(db, actor=actor, action=audit.INSTANCE_RESTART, instance=instance)
+        audit.record(
+            db,
+            actor=actor,
+            action=audit.INSTANCE_RESTART,
+            instance=instance,
+            detail={"repaired_pyca_events": repaired} if repaired else None,
+        )
         db.commit()
     db.refresh(instance)
     return _mark_operator_hold(db, instance)

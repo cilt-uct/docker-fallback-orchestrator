@@ -39,6 +39,7 @@ from app.database import SessionLocal
 from app.instance_lifecycle import (
     InstanceBusyError,
     InstanceNotStartableError,
+    apply_port_map,
     build_instance,
     ensure_ui_credentials,
     instance_lock,
@@ -273,8 +274,10 @@ async def _start(
     ensure_ui_credentials(instance)
     db.commit()
     try:
+        apply_port_map(db, instance)
+        db.commit()
         # Docker calls block - keep them off the event loop the API runs on.
-        await asyncio.to_thread(provision_and_start, instance)
+        repaired = await asyncio.to_thread(provision_and_start, instance)
     except Exception as exc:  # noqa: BLE001 - surfaced via last_error
         _record_start_failure(instance.id, now)
         if isinstance(exc, (InstanceNotStartableError, compose_manager.ComposeError)):
@@ -296,6 +299,8 @@ async def _start(
         _start_failures.pop(instance.id, None)
         instance.status = InstanceStatus.running
         instance.last_error = None
+        if repaired:
+            detail["repaired_pyca_events"] = repaired
         audit.record(db, actor=audit.SYSTEM, action=audit.INSTANCE_START, instance=instance, detail=detail)
     db.commit()
 

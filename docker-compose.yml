@@ -35,6 +35,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${INSTANCES_HOST_DIR:-${PWD}/instances}:${INSTANCES_HOST_DIR:-${PWD}/instances}
       - ${RECORDINGS_HOST_DIR:-/data/pyca-recordings}:${RECORDINGS_HOST_DIR:-/data/pyca-recordings}
+      # config/pyca-ports.yaml: fixed PyCA page ports per venue (read-only, re-read live).
+      - ./config:/app/config:ro
     extra_hosts:
       # host.docker.internal also on Linux (Docker Desktop provides it already).
       - "host.docker.internal:host-gateway"

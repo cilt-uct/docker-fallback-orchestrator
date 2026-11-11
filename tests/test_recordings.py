@@ -16,7 +16,7 @@ from app.config import settings
 from app.models import AuditEvent, RecordingRetention, utcnow
 
 # PyCA status codes used below (see recordings.PYCA_STATUS).
-RECORDING, FAILED_RECORDING, UPLOADING, FINISHED_UPLOADING, PAUSED = 2, 3, 5, 7, 9
+RECORDING, FAILED_RECORDING, UPLOADING, FAILED_UPLOADING, FINISHED_UPLOADING, PAUSED = 2, 3, 5, 6, 7, 9
 
 
 @pytest.fixture
@@ -328,3 +328,73 @@ def test_backups_use_pycas_own_ca_bundle_by_default(make_instance, monkeypatch, 
 
     assert "ca-bundle" not in compose
     assert "certificate      = ''" in conf
+
+
+def test_every_backup_gets_the_configured_pyca_login(make_instance, monkeypatch):
+    monkeypatch.setattr(settings, "pyca_ui_username", "admin")
+    monkeypatch.setattr(settings, "pyca_ui_password", "opencast")
+    # An instance from before the login was shared keeps its random one only until it restarts.
+    old = make_instance(venue="lt1", ui_username="admin", ui_password="random-old-password")
+    new = make_instance(venue="lt2")
+
+    for instance in (old, new):
+        instance_lifecycle.ensure_ui_credentials(instance)
+        assert (instance.ui_username, instance.ui_password) == ("admin", "opencast")
+
+    conf = pyca_config.render_pyca_conf(new, new.ui_username, new.ui_password)
+    assert "username         = 'admin'" in conf
+    assert "password         = 'opencast'" in conf
+
+
+# ---- events PyCA was stopped in the middle of ---------------------------------------
+
+
+def _statuses(venue="room-1"):
+    with sqlite3.connect(settings.instance_dir(venue) / "data" / "pyca.db") as conn:
+        return sorted(status for (status,) in conn.execute("SELECT status FROM recorded_event"))
+
+
+def test_interrupted_recording_and_upload_are_marked_so_they_can_be_ingested(disk):
+    disk(status=RECORDING)
+    disk(status=UPLOADING)
+    disk(status=FINISHED_UPLOADING)
+
+    repaired = recordings.repair_interrupted("room-1")
+
+    assert sorted((r["from"], r["to"]) for r in repaired) == [
+        ("recording", "paused after recording"),
+        ("uploading", "failed uploading"),
+    ]
+    assert _statuses() == [FAILED_UPLOADING, FINISHED_UPLOADING, PAUSED]
+    assert recordings.repair_interrupted("room-1") == []  # nothing left to repair
+
+
+def test_no_pyca_database_means_nothing_to_repair(disk):
+    assert recordings.repair_interrupted("never-started") == []
+
+
+def test_start_repairs_only_while_pyca_is_down(make_instance, disk, monkeypatch):
+    disk(status=RECORDING)
+    instance = make_instance(venue="room-1", rtsp_source="rtsp://cam/s")
+    monkeypatch.setattr(compose_manager, "_run_compose", lambda instance, *args: None)
+
+    monkeypatch.setattr(compose_manager, "has_running_containers", lambda i: True)
+    assert instance_lifecycle.provision_and_start(instance) == []
+    assert _statuses() == [RECORDING]  # a running PyCA's database is left alone
+
+    monkeypatch.setattr(compose_manager, "has_running_containers", lambda i: False)
+    assert [r["to"] for r in instance_lifecycle.provision_and_start(instance)] == ["paused after recording"]
+    assert _statuses() == [PAUSED]
+
+
+def test_a_repair_is_recorded_in_the_start_audit_event(client, db, make_instance, disk, monkeypatch):
+    disk(status=RECORDING)
+    instance = make_instance(venue="room-1", rtsp_source="rtsp://cam/s")
+    monkeypatch.setattr(compose_manager, "_run_compose", lambda instance, *args: None)
+    monkeypatch.setattr(compose_manager, "has_running_containers", lambda i: False)
+
+    assert client.post(f"/instances/{instance.id}/start").status_code == 200
+
+    (event,) = db.query(AuditEvent).filter_by(action=audit.INSTANCE_START).all()
+    (change,) = event.detail["repaired_pyca_events"]
+    assert (change["from"], change["to"]) == ("recording", "paused after recording")
