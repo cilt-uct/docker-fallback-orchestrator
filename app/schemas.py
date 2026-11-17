@@ -1,16 +1,25 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import AuditActorType, AuditOutcome, InstanceStatus
 
 
 class InstanceCreate(BaseModel):
-    # The venue names the compose project and the config directory, so it has to be
-    # valid for both - Docker rejects anything else only later, at start time.
-    venue: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9_-]*$")
-    agent_id: str = Field(min_length=1, max_length=128)
+    # The venue is always the agent ID - the decision engine finds a venue's backup by its
+    # agent ID, so a venue named otherwise would get a second backup for the same agent.
+    # Docker and folder names come from safe_name(), so any agent ID works.
+    agent_id: str = Field(min_length=1, max_length=128, pattern=r"^\S(.*\S)?$")
     rtsp_source: str | None = Field(default=None, max_length=512)
+    # Accepted for older clients, but only if it's the agent ID.
+    venue: str | None = None
+
+    @model_validator(mode="after")
+    def _venue_is_the_agent_id(self) -> "InstanceCreate":
+        if self.venue is not None and self.venue != self.agent_id:
+            raise ValueError("venue must be the same as agent_id (or left out)")
+        self.venue = self.agent_id
+        return self
 
 
 class InstanceRead(BaseModel):

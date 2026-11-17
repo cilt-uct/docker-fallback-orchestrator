@@ -37,6 +37,15 @@ def db():
         session.close()
 
 
+@pytest.fixture(autouse=True)
+def opencast_cameras(monkeypatch):
+    """The camera URLs agents have registered in Opencast, as the API looks them up (agent_id ->
+    URL; empty by default). No test reaches a real Opencast."""
+    cameras: dict[str, str] = {}
+    monkeypatch.setattr(instances, "fetch_rtsp_source", lambda agent_id: cameras.get(agent_id))
+    return cameras
+
+
 @pytest.fixture
 def app(db):
     """The API's routers and error handlers, on the test database, without the lifespan's engine loop."""
@@ -69,9 +78,9 @@ def engine_db(db, monkeypatch):
 def make_instance(db):
     def make(venue="room-1", status=InstanceStatus.stopped, **kwargs):
         kwargs.setdefault("config_dir", f"/tmp/{venue}")
+        kwargs.setdefault("agent_id", venue)
         instance = Instance(
             venue=venue,
-            agent_id=venue,
             ui_port=9000 + db.query(Instance).count(),
             compose_project=f"pyca-{venue}",
             status=status,

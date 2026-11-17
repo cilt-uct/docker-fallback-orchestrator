@@ -65,11 +65,43 @@ def test_unexpected_failure_is_not_echoed_to_the_client(client, db, monkeypatch,
 # ---- API: create ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("venue", ["Test", "has space", "-leading", "", "a/b", "../etc"])
-def test_create_rejects_venues_docker_or_the_filesystem_would_choke_on(client, db, venue):
-    resp = client.post("/instances", json={"venue": venue, "agent_id": "agent-1"})
+@pytest.mark.parametrize("agent_id", ["", " ", " lt1", "lt1 "])
+def test_create_rejects_a_blank_or_padded_agent_id(client, db, agent_id):
+    resp = client.post("/instances", json={"agent_id": agent_id})
     assert resp.status_code == 422
     assert db.query(Instance).count() == 0
+
+
+def test_the_venue_is_always_the_agent_id(client, db):
+    resp = client.post("/instances", json={"agent_id": "lt1"})
+
+    assert resp.status_code == 201
+    assert (resp.json()["venue"], resp.json()["agent_id"]) == ("lt1", "lt1")
+
+
+def test_a_venue_named_differently_from_its_agent_is_rejected(client, db):
+    resp = client.post("/instances", json={"venue": "lecture-theatre-1", "agent_id": "lt1"})
+
+    assert resp.status_code == 422
+    assert db.query(Instance).count() == 0
+
+
+def test_an_agent_id_docker_would_reject_gets_safe_docker_names(client, db):
+    resp = client.post("/instances", json={"agent_id": "LT 1/North"})
+
+    assert resp.status_code == 201
+    instance = db.get(Instance, resp.json()["id"])
+    assert instance.venue == "LT 1/North"
+    assert instance.compose_project.startswith("pyca-lt-1-north-")
+
+
+def test_a_second_instance_for_an_agent_is_rejected(client, db, make_instance):
+    make_instance(venue="lecture-theatre-1", agent_id="lt1")  # from before the rule
+
+    resp = client.post("/instances", json={"agent_id": "lt1"})
+
+    assert resp.status_code == 409
+    assert db.query(Instance).count() == 1
 
 
 def test_create_with_no_free_ports_is_a_conflict_not_a_500(client, db, monkeypatch):
@@ -77,7 +109,7 @@ def test_create_with_no_free_ports_is_a_conflict_not_a_500(client, db, monkeypat
         instance_lifecycle, "allocate_port", _raise(NoPortsAvailableError("No free ports in range 9000-9000"))
     )
 
-    resp = client.post("/instances", json={"venue": "room-1", "agent_id": "agent-1"})
+    resp = client.post("/instances", json={"agent_id": "room-1"})
 
     assert resp.status_code == 409
     assert "No free ports" in resp.json()["detail"]
@@ -89,7 +121,7 @@ def test_create_losing_a_race_for_the_port_is_a_conflict(client, db, monkeypatch
     taken = make_instance(venue="room-a")
     monkeypatch.setattr(instance_lifecycle, "allocate_port", lambda db, venue: taken.ui_port)
 
-    resp = client.post("/instances", json={"venue": "room-b", "agent_id": "agent-1"})
+    resp = client.post("/instances", json={"agent_id": "room-b"})
 
     assert resp.status_code == 409
     assert db.query(Instance).count() == 1

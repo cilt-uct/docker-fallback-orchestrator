@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import compose_manager, pyca_config, recordings
+from app import audit, compose_manager, pyca_config, recordings
 from app.config import safe_name, settings
 from app.models import Instance, InstanceStatus
 from app.port_allocator import allocate_port, load_port_map
@@ -78,6 +78,22 @@ def ensure_ui_credentials(instance: Instance) -> None:
     Docker, so a crash mid-start can't leave a running PyCA whose login the database doesn't
     know."""
     instance.ui_username, instance.ui_password = pyca_config.ui_credentials()
+
+
+def sync_rtsp_source(db: Session, instance: Instance, rtsp_source: str | None, actor: audit.Actor) -> None:
+    """Take the camera URL the agent registered in Opencast, which wins over whatever the
+    instance has. None (no registration, or Opencast unreachable) changes nothing. The caller
+    commits; a running PyCA uses the new URL from its next start or restart."""
+    if not rtsp_source or instance.rtsp_source == rtsp_source:
+        return
+    audit.record(
+        db,
+        actor=actor,
+        action=audit.INSTANCE_RTSP_SOURCE_CHANGED,
+        instance=instance,
+        detail={"from": audit.redact_url(instance.rtsp_source), "to": audit.redact_url(rtsp_source)},
+    )
+    instance.rtsp_source = rtsp_source
 
 
 def apply_port_map(db: Session, instance: Instance) -> None:

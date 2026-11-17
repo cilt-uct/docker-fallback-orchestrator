@@ -90,14 +90,14 @@
         <!-- The card holds only the table's own controls; the page title and actions are in the page header. Count = matches vs. total, not the stat card's total. -->
         <div class="d-flex flex-wrap align-items-center gap-2 toolbar-row toolbar-row-filters">
           <i class="bi bi-funnel text-secondary" aria-hidden="true" title="Filter instances"></i>
-          <label for="search-input" class="visually-hidden">Search instances by venue or agent</label>
+          <label for="search-input" class="visually-hidden">Search instances by venue</label>
           <div class="input-group input-group-sm toolbar-search">
             <span class="input-group-text" aria-hidden="true"><i class="bi bi-search"></i></span>
             <input
               id="search-input"
               type="search"
               class="form-control"
-              placeholder="Search by venue or agent&hellip;"
+              placeholder="Search by venue&hellip;"
               autocomplete="off"
             >
           </div>
@@ -123,7 +123,7 @@
             <thead>
               <tr>
                 <th scope="col" data-sort-key="venue" class="sortable">
-                  <button type="button" class="th-sort-btn">Venue / Agent<span class="sort-indicator" aria-hidden="true"></span></button>
+                  <button type="button" class="th-sort-btn">Venue (agent ID)<span class="sort-indicator" aria-hidden="true"></span></button>
                 </th>
                 <th scope="col" data-sort-key="status" class="sortable">
                   <button type="button" class="th-sort-btn">Status<span class="sort-indicator" aria-hidden="true"></span></button>
@@ -170,7 +170,8 @@
     <tr>
       <td>
         <div class="fw-semibold" data-field="venue"></div>
-        <div class="text-secondary small" data-field="agent_id"></div>
+        <!-- Only for instances from before venue had to equal the agent ID. -->
+        <div class="text-secondary small d-none" data-field="agent_id"></div>
       </td>
       <td>
         <span class="badge status-badge" data-field="status-badge"></span>
@@ -220,22 +221,19 @@
         </div>
         <div class="modal-body">
           <div class="mb-3">
-            <label for="field-venue" class="form-label">Venue</label>
+            <label for="field-agent-id" class="form-label">Agent ID</label>
             <input
               type="text"
               class="form-control"
-              id="field-venue"
-              name="venue"
-              pattern="[a-z0-9][a-z0-9-]*"
+              id="field-agent-id"
+              name="agent_id"
+              maxlength="128"
               required
-              aria-describedby="venue-help"
+              aria-describedby="agent-id-help"
             >
-            <div id="venue-help" class="form-text">Lowercase letters, numbers and hyphens. Used to name the compose project.</div>
-            <div class="invalid-feedback">Enter a venue name (lowercase letters, numbers, hyphens).</div>
-          </div>
-          <div class="mb-3">
-            <label for="field-agent-id" class="form-label">Agent ID</label>
-            <input type="text" class="form-control" id="field-agent-id" name="agent_id" required>
+            <div id="agent-id-help" class="form-text">
+              The capture agent's ID in Opencast (its <em>Location</em>). The venue is named after it.
+            </div>
             <div class="invalid-feedback">Agent ID is required.</div>
           </div>
           <div class="mb-3">

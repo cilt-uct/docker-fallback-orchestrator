@@ -44,6 +44,7 @@ from app.instance_lifecycle import (
     ensure_ui_credentials,
     instance_lock,
     provision_and_start,
+    sync_rtsp_source,
 )
 from app.models import AgentHealth, AuditOutcome, Instance, InstanceStatus, utcnow
 from app.opencast_client import AgentState, OpencastClient, OpencastError, ScheduledEvent
@@ -158,21 +159,25 @@ def _teardown_blocker(health: AgentHealth | None, now: datetime) -> str | None:
     return None
 
 
+def _sync_rtsp_sources(db: Session, observed: dict[str, tuple[AgentState, AgentHealth]]) -> None:
+    """Keep every instance's camera URL in step with Opencast, not only those needing a
+    backup this pass - so a stopped or hand-added backup has the right one for its next start."""
+    for instance in db.query(Instance).all():
+        state = observed.get(instance.agent_id, (None, None))[0]
+        if state is None:
+            continue
+        try:
+            with instance_lock(instance.id):
+                sync_rtsp_source(db, instance, state.rtsp_source, audit.SYSTEM)
+        except InstanceBusyError:
+            continue  # being changed from the dashboard - next pass
+    db.commit()
+
+
 def _get_or_create_instance(db: Session, venue: str, agent_id: str, rtsp_source: str | None) -> Instance:
     instance = db.query(Instance).filter_by(venue=venue).one_or_none()
     if instance:
-        if rtsp_source and instance.rtsp_source != rtsp_source:
-            audit.record(
-                db,
-                actor=audit.SYSTEM,
-                action=audit.INSTANCE_RTSP_SOURCE_CHANGED,
-                instance=instance,
-                detail={
-                    "from": audit.redact_url(instance.rtsp_source),
-                    "to": audit.redact_url(rtsp_source),
-                },
-            )
-            instance.rtsp_source = rtsp_source
+        sync_rtsp_source(db, instance, rtsp_source, audit.SYSTEM)
         return instance
 
     instance = build_instance(db, venue, agent_id, rtsp_source)
@@ -431,6 +436,7 @@ async def run_once(oc: OpencastClient) -> None:
             instance.id for instance in db.query(Instance).filter(Instance.status.in_(TEARDOWN_STATUSES))
         ]
         observed = await _observe_agents(db, oc, now)
+        _sync_rtsp_sources(db, observed)
 
         for event in events:
             if event.agent_id not in observed:

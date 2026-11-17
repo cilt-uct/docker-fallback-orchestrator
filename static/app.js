@@ -162,7 +162,10 @@ function populateRow(tr, inst, bytes) {
   tr.dataset.status = inst.status;
 
   tr.querySelector('[data-field="venue"]').textContent = inst.venue;
-  tr.querySelector('[data-field="agent_id"]').textContent = inst.agent_id;
+  // Venue and agent ID are the same; only older instances can differ, so show it then.
+  const agentEl = tr.querySelector('[data-field="agent_id"]');
+  agentEl.textContent = inst.agent_id;
+  agentEl.classList.toggle("d-none", inst.agent_id === inst.venue);
 
   const badge = tr.querySelector('[data-field="status-badge"]');
   const badgeClass = STATUS_BADGE[inst.status] || "text-bg-secondary";
@@ -529,7 +532,6 @@ async function createInstance(event) {
   }
 
   const payload = {
-    venue: form.venue.value.trim(),
     agent_id: form.agent_id.value.trim(),
     rtsp_source: form.rtsp_source.value.trim() || null,
   };

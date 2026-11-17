@@ -147,7 +147,7 @@ def test_ca_coming_online_during_the_recording_does_not_stop_the_backup(
 def test_backup_stays_until_the_ca_has_been_healthy_for_24h(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
 ):
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(hours=23), unhealthy_ago=timedelta(hours=23))
 
     assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == []
@@ -157,7 +157,7 @@ def test_backup_stays_until_the_ca_has_been_healthy_for_24h(
 def test_backup_stays_for_4_days_after_the_last_lecture_that_needed_it(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
 ):
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(days=3), needed_lecture_ended_ago=timedelta(days=3, hours=12))
 
     assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == []
@@ -167,7 +167,7 @@ def test_backup_stays_for_4_days_after_the_last_lecture_that_needed_it(
 def test_backup_is_torn_down_once_the_ca_is_stable_and_4_days_have_passed(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
 ):
-    instance_id = make_instance(status=InstanceStatus.running).id
+    instance_id = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s").id
     seed_health(healthy_for=timedelta(days=5), needed_lecture_ended_ago=timedelta(days=4, hours=1))
 
     assert engine(fake_opencast([], {"room-1": agent_state()}))["stopped"] == ["room-1"]
@@ -184,7 +184,7 @@ def test_backup_is_torn_down_once_the_ca_is_stable_and_4_days_have_passed(
 def test_backup_is_never_torn_down_while_its_pyca_holds_work(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health, activity
 ):
-    instance_id = make_instance(status=InstanceStatus.running).id
+    instance_id = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s").id
     seed_health(healthy_for=timedelta(days=5))
     engine.calls["pyca"] = activity
 
@@ -196,7 +196,7 @@ def test_backup_is_never_torn_down_while_its_pyca_holds_work(
 def test_a_ca_going_down_again_restarts_the_24h_clock(
     engine, engine_db, make_instance, fake_opencast, agent_state, offline_agent, seed_health
 ):
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(days=5))
 
     engine(fake_opencast([], {"room-1": offline_agent()}))  # down again, briefly
@@ -209,7 +209,7 @@ def test_a_ca_going_down_again_restarts_the_24h_clock(
 def test_no_decision_without_the_agents_current_state(
     engine, engine_db, make_instance, fake_opencast, seed_health
 ):
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(days=5))
 
     # Opencast doesn't report the agent this pass: keep the backup rather than guess.
@@ -252,7 +252,7 @@ def test_all_agent_states_come_from_one_request_per_pass(
 def test_failing_to_fetch_the_agent_list_fails_the_pass_and_touches_nothing(
     engine, engine_db, make_instance, fake_opencast, scheduled_event, seed_health
 ):
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(days=5))
 
     with pytest.raises(decision_engine.OpencastError):
@@ -284,7 +284,9 @@ def test_ui_credentials_are_saved_before_docker_is_started(
 
 
 def test_backup_without_stored_credentials_is_treated_as_busy(make_instance):
-    instance = make_instance(status=InstanceStatus.running)  # no ui_username/ui_password
+    instance = make_instance(
+        status=InstanceStatus.running, rtsp_source="rtsp://cam/s"
+    )  # no ui_username/ui_password
 
     assert asyncio.run(decision_engine.pyca_activity(instance)) == BackupReason.pyca_unreachable
 
@@ -313,7 +315,7 @@ def test_backup_holding_un_ingested_recordings_is_still_torn_down(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
 ):
     """Duplicates nobody ingests must not keep a backup up forever - the recordings stay on disk."""
-    make_instance(status=InstanceStatus.running)
+    make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     seed_health(healthy_for=timedelta(days=5))
     engine.calls["pyca"] = decision_engine.activity_from_statuses({"paused after recording"})
 
@@ -323,7 +325,7 @@ def test_backup_holding_un_ingested_recordings_is_still_torn_down(
 def test_backup_started_by_hand_stays_up_until_stopped_by_hand(
     engine, engine_db, make_instance, fake_opencast, agent_state, seed_health
 ):
-    instance_id = make_instance(status=InstanceStatus.running).id
+    instance_id = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s").id
     seed_health(healthy_for=timedelta(days=5))  # otherwise due for teardown
     operator = audit.Actor(type=AuditActorType.operator, source_ip="10.0.0.1")
     engine_db.add(
@@ -354,7 +356,7 @@ def test_backup_started_by_hand_stays_up_until_stopped_by_hand(
 
 
 def test_a_failed_manual_start_does_not_hold(db, make_instance):
-    instance = make_instance(status=InstanceStatus.error)
+    instance = make_instance(status=InstanceStatus.error, rtsp_source="rtsp://cam/s")
     operator = audit.Actor(type=AuditActorType.operator)
     audit.record(
         db, actor=operator, action=audit.INSTANCE_START, outcome=AuditOutcome.failure, instance=instance
@@ -365,7 +367,7 @@ def test_a_failed_manual_start_does_not_hold(db, make_instance):
 
 
 def test_instance_list_shows_a_manual_hold(client, db, make_instance):
-    instance = make_instance(status=InstanceStatus.running)
+    instance = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     audit.record(
         db, actor=audit.Actor(type=AuditActorType.operator), action=audit.INSTANCE_START, instance=instance
     )

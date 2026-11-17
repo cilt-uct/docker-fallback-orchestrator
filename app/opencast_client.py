@@ -64,14 +64,59 @@ class AgentState:
         return self.seconds_since_update > settings.agent_offline_seconds
 
 
+def _parse_agent_states(body) -> dict[str, AgentState]:
+    """capture-admin/agents.json -> AgentState by agent ID. A malformed agent is skipped."""
+    agents = body.get("agents") if isinstance(body, dict) else None
+    if agents in (None, ""):  # Opencast sends "" rather than an empty list when there are none
+        return {}
+    if not isinstance(agents, dict):
+        raise OpencastError("Opencast sent an unexpected shape for the capture agent list")
+    # Same quirk as capabilities: a single agent comes as a bare object, not a list.
+    items = agents.get("agent") or []
+    if isinstance(items, dict):
+        items = [items]
+
+    states = {}
+    for item in items:
+        try:
+            agent_id = item["name"]
+            states[agent_id] = AgentState(
+                agent_id=agent_id,
+                state=item["state"],
+                seconds_since_update=float(item["time-since-last-update"]) / 1000,
+                rtsp_source=_extract_rtsp_source(item.get("capabilities")),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("Skipping malformed capture agent %r: %r", item, exc)
+    return states
+
+
+def _client_options() -> dict:
+    return {
+        "base_url": settings.opencast_url,
+        "auth": httpx.DigestAuth(settings.opencast_username, settings.opencast_password),
+        "headers": {"X-Requested-Auth": "Digest", "Accept": "application/json"},
+    }
+
+
+def fetch_rtsp_source(agent_id: str) -> str | None:
+    """The camera URL the agent registered with Opencast, or None if it has none or Opencast
+    can't be asked right now. For the API's sync handlers; the engine reads it from its own
+    get_agent_states() each pass."""
+    try:
+        with httpx.Client(**_client_options(), timeout=10.0) as client:
+            resp = client.get("/capture-admin/agents.json")
+            resp.raise_for_status()
+            state = _parse_agent_states(resp.json()).get(agent_id)
+    except (httpx.HTTPError, ValueError, OpencastError) as exc:
+        logger.warning("Could not look up the camera URL for agent %s in Opencast: %r", agent_id, exc)
+        return None
+    return state.rtsp_source if state else None
+
+
 class OpencastClient:
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(
-            base_url=settings.opencast_url,
-            auth=httpx.DigestAuth(settings.opencast_username, settings.opencast_password),
-            headers={"X-Requested-Auth": "Digest", "Accept": "application/json"},
-            timeout=30.0,
-        )
+        self._client = httpx.AsyncClient(**_client_options(), timeout=30.0)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -128,27 +173,4 @@ class OpencastClient:
 
         A single malformed agent is skipped rather than failing the list.
         """
-        body = await self._get_json("/capture-admin/agents.json")
-        agents = body.get("agents") if isinstance(body, dict) else None
-        if agents in (None, ""):  # Opencast sends "" rather than an empty list when there are none
-            return {}
-        if not isinstance(agents, dict):
-            raise OpencastError("Opencast sent an unexpected shape for the capture agent list")
-        # Same quirk as capabilities: a single agent comes as a bare object, not a list.
-        items = agents.get("agent") or []
-        if isinstance(items, dict):
-            items = [items]
-
-        states = {}
-        for item in items:
-            try:
-                agent_id = item["name"]
-                states[agent_id] = AgentState(
-                    agent_id=agent_id,
-                    state=item["state"],
-                    seconds_since_update=float(item["time-since-last-update"]) / 1000,
-                    rtsp_source=_extract_rtsp_source(item.get("capabilities")),
-                )
-            except (AttributeError, KeyError, TypeError, ValueError) as exc:
-                logger.warning("Skipping malformed capture agent %r: %r", item, exc)
-        return states
+        return _parse_agent_states(await self._get_json("/capture-admin/agents.json"))

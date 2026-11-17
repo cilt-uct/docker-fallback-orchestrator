@@ -2,6 +2,7 @@ import logging
 from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,8 +31,10 @@ from app.instance_lifecycle import (
     provision_and_restart,
     provision_and_start,
     recordings_dir,
+    sync_rtsp_source,
 )
 from app.models import AuditOutcome, Instance, InstanceStatus
+from app.opencast_client import fetch_rtsp_source
 from app.port_allocator import NoPortsAvailableError
 from app.schemas import InstanceCreate, InstanceRead, InstanceRuntimeStatus
 
@@ -127,13 +130,24 @@ def create_instance(
     db: Session = Depends(get_db),
     actor: Actor = Depends(operator_actor),
 ):
-    if db.query(Instance).filter_by(venue=payload.venue).first():
+    # By agent too: an older instance may be named differently but back up the same agent.
+    if (
+        db.query(Instance)
+        .filter(or_(Instance.venue == payload.venue, Instance.agent_id == payload.agent_id))
+        .first()
+    ):
         raise _create_rejected(
-            db, actor, payload, "venue already exists", f"Instance for venue '{payload.venue}' already exists"
+            db,
+            actor,
+            payload,
+            "agent already has an instance",
+            f"Agent '{payload.agent_id}' already has an instance",
         )
 
+    # Left empty, it's the camera the agent registered in Opencast (if it has one yet).
+    rtsp_source = payload.rtsp_source or fetch_rtsp_source(payload.agent_id)
     try:
-        instance = build_instance(db, payload.venue, payload.agent_id, payload.rtsp_source)
+        instance = build_instance(db, payload.venue, payload.agent_id, rtsp_source)
     except NoPortsAvailableError as exc:
         raise _create_rejected(db, actor, payload, str(exc), str(exc)) from exc
 
@@ -160,6 +174,13 @@ def create_instance(
     db.commit()
     db.refresh(instance)
     return instance
+
+
+def _fill_in_rtsp_source(db: Session, actor: Actor, instance: Instance) -> None:
+    """Without a camera URL a backup can't start; try the one the agent registered in Opencast.
+    Otherwise the decision engine fills it in within a poll of the agent registering one."""
+    if not instance.rtsp_source:
+        sync_rtsp_source(db, instance, fetch_rtsp_source(instance.agent_id), actor)
 
 
 def _get_instance_or_404(db: Session, instance_id: int) -> Instance:
@@ -196,6 +217,7 @@ def start_instance(
     with _locked(instance):
         # Saved before Docker is touched, so a crash mid-start can't leave a running PyCA
         # whose login the database doesn't know (see ensure_ui_credentials).
+        _fill_in_rtsp_source(db, actor, instance)
         instance.status = InstanceStatus.starting
         ensure_ui_credentials(instance)
         db.commit()
@@ -255,6 +277,7 @@ def restart_instance(
 ):
     instance = _get_instance_or_404(db, instance_id)
     with _locked(instance):
+        _fill_in_rtsp_source(db, actor, instance)
         try:
             apply_port_map(db, instance)
             db.commit()

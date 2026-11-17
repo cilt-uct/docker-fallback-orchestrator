@@ -33,7 +33,7 @@ def test_record_snapshots_instance_and_system_actor(db, make_instance):
 def test_create_is_audited_with_null_operator_and_redacted_source(client, db):
     resp = client.post(
         "/instances",
-        json={"venue": "room-1", "agent_id": "agent-1", "rtsp_source": "rtsp://u:p@cam/stream"},
+        json={"agent_id": "room-1", "rtsp_source": "rtsp://u:p@cam/stream"},
     )
     assert resp.status_code == 201
 
@@ -48,7 +48,7 @@ def test_create_is_audited_with_null_operator_and_redacted_source(client, db):
 
 def test_duplicate_create_is_audited_as_failure(client, db, make_instance):
     make_instance()
-    resp = client.post("/instances", json={"venue": "room-1", "agent_id": "agent-1"})
+    resp = client.post("/instances", json={"agent_id": "room-1"})
     assert resp.status_code == 409
 
     (event,) = _events(db)
@@ -170,7 +170,7 @@ def test_engine_audits_a_repeating_start_failure_once(
 def test_engine_audits_deferred_teardown_once_then_the_stop(
     engine_db, monkeypatch, make_instance, fake_opencast, agent_state, seed_health
 ):
-    instance = make_instance(status=InstanceStatus.running)
+    instance = make_instance(status=InstanceStatus.running, rtsp_source="rtsp://cam/s")
     # The agent has been healthy long enough, so only the PyCA's own work holds the backup up.
     seed_health("room-1", healthy_for=timedelta(hours=25))
     # It was started for two events, and an older lifetime (closed by a stop) for another.
